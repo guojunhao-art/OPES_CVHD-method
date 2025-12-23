@@ -1,0 +1,16 @@
+clear
+units real
+atom_style charge
+boundary p p p
+read_data ../data.c5
+pair_style reaxff NULL
+pair_coeff * * ../CHO.ff H C
+fix 1 all qeq/reax 1 0.0 10.0 1e-6 reaxff
+timestep 0.1
+velocity all create 1000 1 dist gaussian
+fix b1 all nvt temp 1000 1000 50.0
+run     10000
+fix plumed all plumed plumedfile plumed.dat
+thermo 1000
+thermo_style custom step temp press density
+run 50000000

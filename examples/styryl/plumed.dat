@@ -1,0 +1,79 @@
+UNITS LENGTH=A ENERGY=kcal/mol TIME=fs
+LOAD FILE= OPESmetadCV.cpp
+LOAD FILE= CVHDM.cpp
+LOAD FILE= GlobalDistortion.cpp
+
+c: COM ATOMS=12-15
+DISTANCE ATOMS=4,c LABEL=d
+COORDINATION GROUPA=4 GROUPB=c D_0=1.0 R_0=2.0 LABEL=cn NN=2
+
+DISTANCE ATOMS=1,2 LABEL=D1
+DISTANCE ATOMS=2,3 LABEL=D2
+DISTANCE ATOMS=3,4 LABEL=D3
+DISTANCE ATOMS=4,5 LABEL=D4
+DISTANCE ATOMS=5,6 LABEL=D5
+DISTANCE ATOMS=6,1 LABEL=D6
+
+DISTANCE ATOMS=1,7 LABEL=D11
+DISTANCE ATOMS=2,8 LABEL=D12
+DISTANCE ATOMS=3,9 LABEL=D13
+DISTANCE ATOMS=5,10 LABEL=D14
+DISTANCE ATOMS=6,11 LABEL=D15
+DISTANCE ATOMS=12,13 LABEL=D16
+DISTANCE ATOMS=14,15 LABEL=D17
+
+cvb: CUSTOM ARG=cn FUNC=1-x PERIODIC=NO
+
+CVHDM ...
+LABEL=ccvv
+ARG=cvb
+P=2
+CUTOFF=0.4
+PERIODIC=NO
+... CVHDM
+
+exc: CUSTOM ARG=ccvv FUNC=step(x-0.99) PERIODIC=NO
+
+OPES_METADCV ...
+ARG=ccvv
+PACE=1000 #kernel update pace
+LABEL=mtd
+TEMP=1000 #simulation temperature, used for hypertime caculation
+BARRIER=15 #initial barrier parameter, E0
+EXCLUDED_REGION=exc
+ADDING=3 # ΔE0 
+ADDPACE=10 # Length of time window  (10 times of the kernel deposition period)
+WAITTING_TIME=3 # when the slope is small than SLOPE for 3 consecutive time windows, the convergence is achieved.
+SLOPE=0.015 # slope convergence threshold δc
+CVHD # CVHD mode
+CVHD_RESETTIME=10000 # waiting time, tw
+ACCELERATION # calculate the boost factor
+POSI=0.8 # the bias deposited in ηb=0.8 is used to damp ΔE
+SLOWF=3 # the value of slowf
+... OPES_METADCV
+
+COMMITTOR ...
+   ARG=cn
+   STRIDE=1000
+   BASIN_LL1=0.0
+   BASIN_UL1=0.2
+... COMMITTOR
+
+COMMITTOR ...
+   ARG=D16
+   STRIDE=1000
+   BASIN_LL1=2
+   BASIN_UL1=5
+... COMMITTOR
+
+COMMITTOR ...
+   ARG=D17
+   STRIDE=1000
+   BASIN_LL1=2
+   BASIN_UL1=5
+... COMMITTOR
+
+
+FLUSH STRIDE=1000
+PRINT ARG=d,cn,cvb,ccvv,mtd.*,D1,D2,D3,D4,D5,D6,D11,D12,D13,D14,D15,D16,D17 STRIDE=1000 FILE=colvar
+
