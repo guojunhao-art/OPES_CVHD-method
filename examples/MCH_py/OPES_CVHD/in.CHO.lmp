@@ -1,0 +1,43 @@
+# REAX potential for CHO system
+# .....
+
+units		real
+
+atom_style	charge
+atom_modify     map array
+boundary        p p p
+#package         kokkos neigh half comm device
+#newton          on
+read_data	data.c7h14
+group           carbon type 2
+group           hydrogen type 1
+
+
+pair_style	reaxff NULL
+pair_coeff	* * CHO.ff H C
+fix             1 all qeq/reax 1 0.0 10.0 1e-6 reaxff
+
+
+neighbor	2 bin
+#neigh_modify	every 10 delay 0 check no
+
+timestep        0.1
+thermo          1000
+thermo_style	custom step temp density press
+
+fix             balance all nvt temp 1000.0 1000.0 100.0
+velocity        all create 1000 69821 dist gaussian
+#run             5000
+reset_timestep  0
+
+##############################################################################
+
+
+fix             pp all plumed plumedfile ./plumed.dat outfile p.log
+fix             bond all reax/c/bonds 5000 bonds.tatb
+dump		1 all atom 5000 dump.reax.cho
+run             200000000
+unfix           balance
+##############################################################################
+
+
