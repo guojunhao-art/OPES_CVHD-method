@@ -1,0 +1,26 @@
+dimension 3
+units		metal                       # Energy: eV Distance: Angstrom Mass: Kg Times: picosecond
+atom_style	atomic                      # Classical particles
+boundary        p p f                       # p = periodic, f= fixed
+read_data       after.data
+
+
+region bot block INF INF INF INF -15 -7 units box 
+group fbot region bot
+group other subtract all fbot
+
+mass 1 63.546
+pair_style eam
+pair_coeff * *  Cu_u3.eam
+timestep 0.001
+
+dump 1d all custom 1000 dump.sputter id type x y z
+reset_timestep 0 
+thermo 1000 
+thermo_style custom step pe ke etotal temp vol press
+fix             pp all plumed plumedfile ./plumed.dat outfile p.log
+
+fix s1 fbot setforce 0.0 0.0 0.0 
+
+fix 1 all nvt temp 200.00 200.0 10.0 
+run 100000000

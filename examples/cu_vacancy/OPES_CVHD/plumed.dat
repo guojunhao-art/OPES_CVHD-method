@@ -1,0 +1,51 @@
+UNITS LENGTH=A TIME=ps ENERGY=eV
+LOAD FILE= OPESmetadCV.cpp
+LOAD FILE= CVHDM.cpp
+LOAD FILE= GlobalDistortion.cpp
+
+GLOBALDISTORTION ...
+label=cu
+GROUPA=1,7,13,19,25,31,37,43,49,55,61,67,73,79,85,91,97,103,109,115,121,127,133,139,145,151,157,163,169,175,181,187,193,205,211,217,223,229,235,241,247,253,259,265,271,277,283,289,295
+P=8
+REF=2.55
+RESET_REF
+RESET_MAXDIST=0.294
+RESET_TIME=10000
+USE_CUTOFF
+REF_MIN=0
+REF_MAX=2.9
+... GLOBALDISTORTION
+
+
+CVHDM ...
+LABEL=cv1
+ARG=cu
+P=6
+CUTOFF=0.294
+PERIODIC=NO
+... CVHDM
+
+xx: CUSTOM PERIODIC=NO ARG=cv1 FUNC=step(x-0.98)
+
+OPES_METADCV ...
+LABEL=mtd
+ARG=cv1
+PACE=500 #kernel update pace
+TEMP=200 #simulation temperature, used for hypertime caculation
+BARRIER=0.2 #initial barrier parameter, E0
+ADDING=0.03 # ΔE0
+ADDPACE=10 # Length of time window  (10 times of the kernel deposition period)
+WAITTING_TIME=3 # when the slope is small than SLOPE for 3 consecutive time windows, the convergence is achieved.
+SLOPE=0.0015 # slope convergence threshold δc
+CVHD # CVHD mode
+CVHD_RESETTIME=10000 # waiting time, tw
+ACCELERATION # calculate the boost factor
+EXCLUDED_REGION=xx
+POSI=0.8# the bias deposited in η=0.8 is used to damp ΔE
+SLOWF=5 # the value of slowf
+... OPES_METADCV
+
+
+FLUSH STRIDE=1000
+PRINT ARG=cu,cv1,mtd.* STRIDE=1000 FILE=colvar
+
