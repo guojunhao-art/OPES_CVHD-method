@@ -53,12 +53,12 @@ Damping strategy for bias growth near transition states
 Compatibility with hyperdynamics time reconstruction  
 
 ## 4. Licensing   
-This repository is distributed under the GNU Lesser General Public License v3.0 (LGPL-3.0), consistent with the licenses of the original PLUMED source code from which it is derived.  
+This repository is distributed under the GNU Lesser General Public License v2.1 (LGPL-2.1), consistent with the licenses of the original PLUMED source code from which it is derived.  
 Original PLUMED and CVHD code:  
 https://github.com/plumed/plumed2  
 https://github.com/kbal/plumed2  
 License: LGPL-3.0  
-Users are free to use, modify, and redistribute this code under the terms of the LGPL-3.0 license.  
+Users are free to use, modify, and redistribute this code under the terms of the LGPL-2.1 license.  
 Please ensure that any derivative works comply with the LGPL requirements.  
 
 ## 5. Requirements  
