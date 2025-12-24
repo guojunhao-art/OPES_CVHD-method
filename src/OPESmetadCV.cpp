@@ -451,8 +451,7 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
   waittime_=3;
   parse("WAITTING_TIME",waittime_);
   fit.resize(addingstride_,0);
-  slope_=0.01;
-  parse("SLOPE",slope_);
+
 
   barrier=0;
   parse("BARRIER",barrier);
@@ -619,6 +618,8 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
   ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   adding=0;
   parse("ADDING",adding);
+  slope_=adding*0.05;
+  parse("SLOPE",slope_);
   parseFlag("ACCELERATION",acceleration_);
   if(acceleration_)
   {
