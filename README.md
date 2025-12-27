@@ -26,7 +26,8 @@ OPES_CVHD/
 ├── examples/  
 │   ├── styryl/  
 │   ├── cu_vacancy/  
-│   └── mch_pyrolysis/  
+│   └── mch_pyrolysis/ 
+├── gif_make/
 └── README.md  
 
 ## 3. Source Code Provenance  
@@ -65,6 +66,7 @@ Please ensure that any derivative works comply with the LGPL requirements.
 LAMMPS (tested with version 2Aug2023)  
 PLUMED (patched with OPES_CVHD source files)  
 CMake-compatible C++ compiler  
+Matlab (optional, for gif making)
 
 ## 6. Installation  
 1. Clone this repository:  
