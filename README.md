@@ -26,8 +26,8 @@ OPES_CVHD/
 ├── examples/  
 │   ├── styryl/  
 │   ├── cu_vacancy/  
-│   └── mch_pyrolysis/ 
-├── gif_make/
+│   └── mch_pyrolysis/  
+├── gif_make/  
 └── README.md  
 
 ## 3. Source Code Provenance  
