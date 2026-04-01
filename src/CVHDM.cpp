@@ -79,8 +79,8 @@ PERIODIC=NO
 class CVHDM :
   public Function
 {
-  std::vector<double> cutoff;
-  double power;
+  std::vector<double> cutoff_;
+  double power_;
 public:
   explicit CVHDM(const ActionOptions&);
   void calculate();
@@ -101,52 +101,53 @@ CVHDM::CVHDM(const ActionOptions&ao):
   Action(ao),
   Function(ao)
 {
-  //cutoff = 1.0;
-  power = 1.0;
-  parseVector("CUTOFF",cutoff);
-  parse("P",power);
+  power_ = 1.0;
+  parseVector("CUTOFF",cutoff_);
+  parse("P",power_);
 
   addValueWithDerivatives();
   checkRead();
 
   log.printf("  with cutoff:");
-  for(unsigned i=0; i<cutoff.size(); ++i) log.printf(" %f",cutoff[i]);
+  for(unsigned i=0; i<cutoff_.size(); ++i) log.printf(" %f",cutoff_[i]);
   log.printf("\n");
   log.printf("  with power:");
-  log.printf(" %f",power);
+  log.printf(" %f",power_);
   log.printf("\n");
 
-  if( cutoff.size()!=getNumberOfArguments() ) error("number of arguments does not match number of CUTOFF parameters");
+  if( cutoff_.size()!=getNumberOfArguments() ) error("number of arguments does not match number of CUTOFF parameters");
 }
 
 void CVHDM::calculate() {
   const double pi = 3.141592653589793;
-  //const double cutoff2 = cutoff*cutoff;
-  double combine = 0.0;
-  double val, prefact, arg, pnorm;
+  double combined_norm = 0.0;
+  double value, prefactor, projected_argument, pnorm;
+
   for(unsigned i=0; i<getNumberOfArguments(); ++i) {
-    double cv = getArgument(i);
-    double cvv= cv/cutoff[i];
-    combine += pow(cvv, power);
-  };
-  pnorm = pow(combine,2.0/power);
-  arg = pnorm;
-  if(arg < 1.0 && arg > 0.0) {
-    val = 0.5*(1.0-cos(pi*arg));
-    prefact = pow(combine, 2.0/power-1.0)*pi*sin(pi*arg);
-  } else if (arg >= 1.0) {
-    val = 1.0;
-    prefact = 0.0;
-  } else {
-    val = 0.0;
-    prefact = 0.0;
+    const double cv = getArgument(i);
+    const double normalized_cv = cv/cutoff_[i];
+    combined_norm += std::pow(normalized_cv, power_);
   }
+
+  pnorm = std::pow(combined_norm,2.0/power_);
+  projected_argument = pnorm;
+  if(projected_argument < 1.0 && projected_argument > 0.0) {
+    value = 0.5*(1.0-std::cos(pi*projected_argument));
+    prefactor = std::pow(combined_norm, 2.0/power_-1.0)*pi*std::sin(pi*projected_argument);
+  } else if (projected_argument >= 1.0) {
+    value = 1.0;
+    prefactor = 0.0;
+  } else {
+    value = 0.0;
+    prefactor = 0.0;
+  }
+
   for(unsigned i=0; i<getNumberOfArguments(); ++i) {
-    double cv = getArgument(i);
-    double cvv= cv/cutoff[i];
-    setDerivative(i,prefact*pow(cvv,power-1.0)/cutoff[i]);
-  };
-  setValue(val);
+    const double cv = getArgument(i);
+    const double normalized_cv = cv/cutoff_[i];
+    setDerivative(i,prefactor*std::pow(normalized_cv,power_-1.0)/cutoff_[i]);
+  }
+  setValue(value);
 }
 
 }
