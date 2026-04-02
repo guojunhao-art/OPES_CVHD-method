@@ -297,16 +297,17 @@ void GlobalDistortion::calculate() {
 
 void GlobalDistortion::buildReflist() {
   reBuildReflist = false;
-  reflist.clear();
-  checklist.clear();
-
-  Vector distance;
-  double val, dummy;
-  bool consider;
+  const unsigned pair_count = (!twogroups) ? num_a*(num_a-1)/2 : num_a*(num_b-num_a);
+  reflist.assign(pair_count,0.0);
+  checklist.assign(pair_count,false);
 
   if(!twogroups) {
+    #pragma omp parallel for schedule(static)
     for(unsigned i = 0; i < num_a; i++) {
       for(unsigned j = i+1; j < num_a; j++) {
+        Vector distance;
+        double val;
+        double dummy=0.0;
         if(pbc) {
           distance = pbcDistance(getPosition(i),getPosition(j));
         } else {
@@ -314,15 +315,20 @@ void GlobalDistortion::buildReflist() {
         }
         val = distance.modulo();
         if(useSwitch) val = switchingFunction.calculate(val,dummy);
-        consider = true;
+        bool consider = true;
         if(use_cutoff && (val < ref_min || val > ref_max)) consider = false;
-        reflist.push_back(getRefval(val));
-        checklist.push_back(consider);
+        const std::size_t k = triangularPairIndex(i, j, num_a);
+        reflist[k]=getRefval(val);
+        checklist[k]=consider;
       }
     }
   } else {
+    #pragma omp parallel for schedule(static)
     for(unsigned i = 0; i < num_a; i++) {
       for(unsigned j = num_a; j < num_b; j++) {
+        Vector distance;
+        double val;
+        double dummy=0.0;
         if(pbc) {
           distance = pbcDistance(getPosition(i),getPosition(j));
         } else {
@@ -330,25 +336,27 @@ void GlobalDistortion::buildReflist() {
         }
         val = distance.modulo();
         if(useSwitch) val = switchingFunction.calculate(val,dummy);
-        consider = true;
+        bool consider = true;
         if(use_cutoff && (val < ref_min || val > ref_max)) consider = false;
-        reflist.push_back(getRefval(val));
-        checklist.push_back(consider);
+        const std::size_t k = rectangularPairIndex(i, j, num_a, num_b);
+        reflist[k]=getRefval(val);
+        checklist[k]=consider;
       }
     }
   }
 }
 
 void GlobalDistortion::buildNeigbourlist() {
-  checklist.clear();
-
-  Vector distance;
-  double val, dummy;
-  bool consider;
+  const unsigned pair_count = (!twogroups) ? num_a*(num_a-1)/2 : num_a*(num_b-num_a);
+  checklist.assign(pair_count,false);
 
   if(!twogroups) {
+    #pragma omp parallel for schedule(static)
     for(unsigned i = 0; i < num_a; i++) {
       for(unsigned j = i+1; j < num_a; j++) {
+        Vector distance;
+        double val;
+        double dummy=0.0;
         if(pbc) {
           distance = pbcDistance(getPosition(i),getPosition(j));
         } else {
@@ -356,14 +364,19 @@ void GlobalDistortion::buildNeigbourlist() {
         }
         val = distance.modulo();
         if(useSwitch) val = switchingFunction.calculate(val,dummy);
-        consider = true;
+        bool consider = true;
         if(use_cutoff && (val < ref_min || val > ref_max)) consider = false;
-        checklist.push_back(consider);
+        const std::size_t k = triangularPairIndex(i, j, num_a);
+        checklist[k]=consider;
       }
     }
   } else {
+    #pragma omp parallel for schedule(static)
     for(unsigned i = 0; i < num_a; i++) {
       for(unsigned j = num_a; j < num_b; j++) {
+        Vector distance;
+        double val;
+        double dummy=0.0;
         if(pbc) {
           distance = pbcDistance(getPosition(i),getPosition(j));
         } else {
@@ -371,9 +384,10 @@ void GlobalDistortion::buildNeigbourlist() {
         }
         val = distance.modulo();
         if(useSwitch) val = switchingFunction.calculate(val,dummy);
-        consider = true;
+        bool consider = true;
         if(use_cutoff && (val < ref_min || val > ref_max)) consider = false;
-        checklist.push_back(consider);
+        const std::size_t k = rectangularPairIndex(i, j, num_a, num_b);
+        checklist[k]=consider;
       }
     }
   }
