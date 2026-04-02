@@ -69,7 +69,7 @@ However, this should be useful only in very specific cases.
 
 It is possible to take into account also of other bias potentials besides the one of \ref OPES_METADCV during the internal reweighting for \f$P(\mathbf{s})\f$ estimation.
 To do so, one has to add those biases with the EXTRA_BIAS keyword, as in the example below.
-This allows one to define a custom target distribution by adding another bias potential equal to the desired target free energy and setting BIASFACTOR=inf (see example below).
+This allows one to define a custom target distribution by barrier_increment_ another bias potential equal to the desired target free energy and setting BIASFACTOR=inf (see example below).
 Another possible usage of EXTRA_BIAS is to make sure that \ref OPES_METADCV does not push against another fixed bias added to restrain the CVs range (e.g. \ref UPPER_WALLS).
 
 Through the EXCLUDED_REGION keywork, it is possible to specify a region of CV space where no kernels will be deposited.
@@ -173,7 +173,8 @@ private:
   unsigned NumWalkers_;
   unsigned walker_rank_;
   unsigned long counter_;
-  unsigned long mycounter_;//20250218
+  // Effective sample counter used by the running c(t) estimate.
+  unsigned long reweight_count_;
   std::size_t ncv_;
 
   double kbt_;
@@ -181,14 +182,11 @@ private:
   double bias_prefactor_;
   unsigned stride_;
   std::vector<double> sigma0_;
-  ///////////////////////////////////////b
+  // Keep the previous sigma values for dynamic updates.
   std::vector<double> sigma0_old;
-  //////////////////////////////////////b
   std::vector<double> sigma_min_;
-  /////////////////////////////////////a
   std::vector<double> sigma_max_;
-  std::vector<double> posi_;//20250218
-  /////////////////////////////////////a
+  std::vector<double> posi_;
   unsigned adaptive_sigma_stride_;
   unsigned long adaptive_counter_;
   std::vector<double> av_cv_;
@@ -198,35 +196,42 @@ private:
   double epsilon_;
   double sum_weights_;
   double sum_weights2_;
-  double mymy;//20250218
+  // Running sum used in c(t) estimation.
+  double reweight_sum_;
 
   bool no_Zed_;
   double Zed_;
   double KDEnorm_;
 
-  ///
-  double adding;
-  unsigned addingstride_;
-  unsigned waittime_;
-  unsigned number;
-  unsigned fitsuccess;
-  long mycounter;
-  double acc_;
+  // CVHD/OPES adaptive barrier-control variables:
+  // - barrier_increment_: increment applied to barrier parameter E when conditions are met.
+  // - barrier_update_stride_: number of samples used to estimate the local slope stability.
+  // - min_stable_windows_: minimum number of consecutive stable windows before raising E.
+  // - fit_window_index_: write index in the short fitting window buffer.
+  // - stable_fit_windows_: consecutive windows satisfying the slope criterion.
+  // - fit_sample_counter_: counts samples contributing to the local slope estimation.
+  // - acceleration_factor_: running acceleration estimate printed as output component "acc".
+  double barrier_increment_;
+  unsigned barrier_update_stride_;
+  unsigned min_stable_windows_;
+  unsigned fit_window_index_;
+  unsigned stable_fit_windows_;
+  long fit_sample_counter_;
+  double acceleration_factor_;
   bool acceleration_;
   bool cvhd;
-  bool isinput;
-  unsigned cvhd_resetwait;
-  unsigned cvhd_resettime;
-  unsigned cvhd_event;
-  unsigned cvhd_fitered_event;//20250416
+  bool has_user_biasfactor_;
+  unsigned cvhd_reset_wait_;
+  unsigned cvhd_reset_time_;
+  unsigned cvhd_event_count_;
+  unsigned cvhd_filtered_event_count_;
   double barrier;
   double barrier_old;
   double slope_;
   std::vector<double> fit;
-  double slow_;//20250218
-  std::vector<double> cvfiltermax_;//20250416
+  double slow_;
+  std::vector<double> cvfiltermax_;
   std::vector<double> filter;   
-  ///
 
   double threshold2_;
   bool recursive_merge_;
@@ -246,11 +251,10 @@ private:
   double evaluateKernel(const kernel&,const std::vector<double>&,std::vector<double>&,std::vector<double>&);
   std::vector<kernel> kernels_; //all compressed kernels
   OFile kernelsOfile_;
-////////////////////////////////////////////////////////////////////////////
+  // Helper methods for CVHD-specific barrier update logic.
   void myinitialize();
   double evaluate_slope(std::vector<double>&);
   double calculate_maximum(const std::vector<double>& cv);
-////////////////////////////////////////////////////////////////////////////
 
 //neighbour list stuff
   bool nlist_;
@@ -268,7 +272,7 @@ private:
   std::vector<kernel> delta_kernels_;
 
   Value* excluded_region_;
-  std::vector<Value*> monitor_;//20250417
+  std::vector<Value*> monitor_;
   std::vector<Value*> extra_biases_;
 
   OFile stateOfile_;
@@ -372,19 +376,19 @@ void OPESmetadCV<mode>::registerKeywords(Keywords& keys)
   keys.add("optional","STATE_WFILE","write to this file the compressed kernels and all the info needed to RESTART the simulation");
   keys.add("optional","STATE_WSTRIDE","number of MD steps between writing the STATE_WFILE. Default is only on CPT events (but not all MD codes set them)");
   keys.addFlag("STORE_STATES",false,"append to STATE_WFILE instead of ovewriting it each time");
-  ///////////////////////////////////////
+  // CVHD extension options.
   keys.addFlag("ACCELERATION",false,"Set to TRUE if you want to compute the metadynamics acceleration factor.");
   keys.addFlag("CVHD",false,"Use CVHD for the computation of long time scale trajectories.");
   keys.add("optional","CVHD_RESETTIME","the time CVHD waits before resetting the bias.");
-  keys.add("optional","ADDING", "The adding speed");
-  keys.add("optional","ADDPACE", "The adding pace");
-  keys.add("optional", "WAITTING_TIME","The time for waiting");
-  keys.add("optional", "SLOPE"," The slope must small than");
-  keys.add("optional","POSI","the position used to control adding rate");
-  keys.add("optional","SLOWF","the parameter used to control adding rate");
+  keys.add("optional","ADDING", "Increment size used to raise barrier parameter E");
+  keys.add("optional","ADDPACE", "Stride used for evaluating whether E should be raised");
+  keys.add("optional", "WAITING_TIME","Waiting time used by the adaptive barrier update logic");
+  keys.add("optional", "WAITTING_TIME","Deprecated typo alias of WAITING_TIME");
+  keys.add("optional", "SLOPE","Minimum accepted slope for barrier updates");
+  keys.add("optional","POSI","position used to modulate the E increment");
+  keys.add("optional","SLOWF","damping parameter used to modulate the E increment");
   keys.add("optional","MONITOR","the CV used for reaction filtering");
-  keys.add("optional","CVFILTERMAX","The fiter upper thresholds");
-  ///////////////////////////////////////
+  keys.add("optional","CVFILTERMAX","Upper thresholds used for reaction filtering");
 //miscellaneous
   keys.add("optional","EXCLUDED_REGION","kernels are not deposited when the action provided here has a nonzero value, see example above");
   if(!mode::explore)
@@ -404,14 +408,15 @@ void OPESmetadCV<mode>::registerKeywords(Keywords& keys)
   keys.addOutputComponent("work","CALC_WORK","total accumulated work done by the bias");
   keys.addOutputComponent("nlker","NLIST","number of kernels in the neighbor list");
   keys.addOutputComponent("nlsteps","NLIST","number of steps from last neighbor list update");
-////////////////////////////
+  // CVHD-related output components.
   keys.addOutputComponent("acc","ACCELERATION","the metadynamics acceleration factor");
   keys.addOutputComponent("event","CVHD","the number of CVHD events");
-  keys.addOutputComponent("count","CVHD","the my counter");
+  keys.addOutputComponent("barrier","CVHD","current value of the barrier parameter E");
+  keys.addOutputComponent("count","CVHD","deprecated alias of barrier (current E value)");
   keys.addOutputComponent("slo","CVHD","Percent slope");
   keys.addOutputComponent("myrct","default","single estimate");
   keys.addOutputComponent("posibias","CVHD","bias at selected position");
-  keys.addOutputComponent("fevent","CVHD","the number of fitered reactions");
+  keys.addOutputComponent("fevent","CVHD","the number of filtered reactions");
 }
 
 template <class mode>
@@ -419,14 +424,14 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
   : PLUMED_BIAS_INIT(ao)
   , isFirstStep_(true)
   , counter_(1)
-  , mycounter_(1)
+  , reweight_count_(1)
   , ncv_(getNumberOfArguments())
   , Zed_(1)
   , work_(0)
   , excluded_region_(NULL)
-  , mycounter(0)
-  , acceleration_(false), acc_(1.0)
-  , cvhd(false), cvhd_resettime(1000), cvhd_event(0), cvhd_fitered_event(0), number(0), fitsuccess(0), isinput(false)
+  , fit_sample_counter_(0)
+  , acceleration_(false), acceleration_factor_(1.0)
+  , cvhd(false), cvhd_reset_time_(1000), cvhd_event_count_(0), cvhd_filtered_event_count_(0), fit_window_index_(0), stable_fit_windows_(0), has_user_biasfactor_(false)
 {
   std::string error_in_input1("Error in input in action "+getName()+" with label "+getLabel()+": the keyword ");
   std::string error_in_input2(" could not be read correctly");
@@ -446,17 +451,18 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
 
 //other compulsory input
   parse("PACE",stride_);
-  addingstride_=10;
-  parse("ADDPACE",addingstride_);
-  waittime_=3;
-  parse("WAITTING_TIME",waittime_);
-  fit.resize(addingstride_,0);
+  barrier_update_stride_=10;
+  parse("ADDPACE",barrier_update_stride_);
+  min_stable_windows_=3;
+  parse("WAITING_TIME",min_stable_windows_);
+  parse("WAITTING_TIME",min_stable_windows_); // backward compatibility for historical typo
+  fit.resize(barrier_update_stride_,0);
 
 
   barrier=0;
   parse("BARRIER",barrier);
   plumed_massert(barrier>=0,"the BARRIER should be greater than zero");
-  barrier_old=barrier;///////////////////////////////////////////////////
+  barrier_old=barrier;
 
   biasfactor_=barrier/kbt_;
   std::string biasfactor_str;
@@ -465,14 +471,14 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
   {
     biasfactor_=std::numeric_limits<double>::infinity();
     bias_prefactor_=1;
-    isinput=true;
+    has_user_biasfactor_=true;
   }
   else
   {
     if(biasfactor_str.length()>0)
     {
       plumed_massert(Tools::convertNoexcept(biasfactor_str,biasfactor_),error_in_input1+"BIASFACTOR"+error_in_input2);
-      isinput=true;
+      has_user_biasfactor_=true;
     }
     plumed_massert(biasfactor_>1,"BIASFACTOR must be greater than one (use 'inf' for uniform target)");
     bias_prefactor_=1-1./biasfactor_;
@@ -489,7 +495,7 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
   std::vector<std::string> sigma_str;
   parseVector("SIGMA",sigma_str);
   sigma0_.resize(ncv_);
-  sigma0_old.resize(ncv_);////////////////////////////////////
+  sigma0_old.resize(ncv_);
   av_cv_.resize(ncv_,0);
   av_M2_.resize(ncv_,0);
   double dummy;
@@ -514,7 +520,7 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
       plumed_massert(Tools::convertNoexcept(sigma_str[i],sigma0_[i]),error_in_input1+"SIGMA"+error_in_input2);
       if(mode::explore)
         sigma0_[i]*=std::sqrt(biasfactor_); //the sigma of the target is broader Ftg(s)=1/gamma*F(s)
-      sigma0_old[i]=sigma0_[i];/////////////////////////////////
+      sigma0_old[i]=sigma0_[i];
     }
   }
   parseVector("SIGMA_MIN",sigma_min_);
@@ -524,41 +530,38 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
     for(unsigned i=0; i<ncv_; i++)
       plumed_massert(sigma_min_[i]<=sigma0_[i],"SIGMA_MIN should be smaller than SIGMA");
   }
-  /////////////////////////////////////////////////////////////////////////////////////
   parseVector("SIGMA_MAX",sigma_max_);
   plumed_massert(sigma_max_.size()==0 || sigma_max_.size()==ncv_,"number of SIGMA_MAX does not match number of arguments");
 
   parseVector("POSI",posi_);
-  plumed_massert(posi_.size()==0 || posi_.size()==ncv_,"number of SIGMA_MAX does not match number of arguments");
+  plumed_massert(posi_.size()==0 || posi_.size()==ncv_,"number of POSI parameters does not match number of arguments");
 
   slow_=-1;
   parse("SLOWF",slow_);
-
-
-  ////////////////////////////////////////////////////////////////////////////////////
 
   epsilon_=std::exp(-barrier/bias_prefactor_/kbt_);
   parse("EPSILON",epsilon_);
   plumed_massert(epsilon_>0,"you must choose a value for EPSILON greater than zero. Is your BARRIER too high?");
   sum_weights_=std::pow(epsilon_,bias_prefactor_); //to avoid NANs we start with counter_=1 and w0=exp(beta*V0)
-  mymy=sum_weights_;
+  reweight_sum_=sum_weights_;
   sum_weights2_=sum_weights_*sum_weights_;
 
   double cutoff=sqrt(2.*barrier/bias_prefactor_/kbt_);
   if(mode::explore)
     cutoff=sqrt(2.*barrier/kbt_); //otherwise it is too small
-  //////////////////////////////
   cvhd=false;
   parseFlag("CVHD",cvhd);
-  parse("CVHD_RESETTIME",cvhd_resettime);
+  parse("CVHD_RESETTIME",cvhd_reset_time_);
   if (cvhd)
   {
-    cvhd_resetwait = 0;
+    cvhd_reset_wait_ = 0;
     log.printf("  CVHD mode is enabled\n");
     addComponent("event"); componentIsNotPeriodic("event");
     getPntrToComponent("event")->set(0.0);
     addComponent("fevent"); componentIsNotPeriodic("fevent");
     getPntrToComponent("fevent")->set(0.0);
+    addComponent("barrier"); componentIsNotPeriodic("barrier");
+    getPntrToComponent("barrier")->set(barrier);
     addComponent("count"); componentIsNotPeriodic("count");
     getPntrToComponent("count")->set(barrier);
     addComponent("slo"); componentIsNotPeriodic("slo");
@@ -570,7 +573,6 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
   {
     cutoff=4.0;
   }
-  /////////////////////////////
   parse("KERNEL_CUTOFF",cutoff);
   plumed_massert(cutoff>0,"you must choose a value for KERNEL_CUTOFF greater than zero");
   cutoff2_=cutoff*cutoff;
@@ -615,10 +617,9 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
 //optional stuff
   no_Zed_=false;
   parseFlag("NO_ZED",no_Zed_);
-  ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-  adding=0;
-  parse("ADDING",adding);
-  slope_=adding*0.05;
+  barrier_increment_=0;
+  parse("ADDING",barrier_increment_);
+  slope_=barrier_increment_*0.05;
   parse("SLOPE",slope_);
   parseFlag("ACCELERATION",acceleration_);
   if(acceleration_)
@@ -630,7 +631,6 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
     addComponent("acc"); componentIsNotPeriodic("acc"); getPntrToComponent("acc")->set(1.0);
   }
 
-  //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   if(no_Zed_)
   { //this makes it more gentle in the initial phase
     sum_weights_=1;
@@ -657,16 +657,14 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
     parseArgumentList("EXTRA_BIAS",extra_biases_);
     if(extra_biases_.size()>0)
       requestExtraDependencies(extra_biases_);
-    ///////////////////////////////////////////////////////////////////
     parseArgumentList("MONITOR",monitor_);
     if(monitor_.size()>0)
     {
       requestExtraDependencies(monitor_);
       parseVector("CVFILTERMAX",cvfiltermax_);
-      plumed_massert(cvfiltermax_.size()==monitor_.size(),"The number of CVFILTERMAX should be same as MONITOR");
+      plumed_massert(cvfiltermax_.size()==monitor_.size(),"The number of CVFILTERMAX entries should match MONITOR");
       filter.resize(monitor_.size(),0);
     }
-    //////////////////////////////////////////////////////////////////
   }
 
 //kernels file
@@ -876,7 +874,7 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
           addKernel(height,center,sigma);
           const double weight=std::exp(logweight);
           sum_weights_+=weight; //this sum is slightly inaccurate, because when printing some precision is lost
-          mymy=sum_weights_;
+          reweight_sum_=sum_weights_;
           sum_weights2_+=weight*weight;
           counter_++;
         }
@@ -1045,7 +1043,6 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
     log.printf("\n");
   }
   
-  ///////////////////////////////
     if(sigma_max_.size()>0)
   {
     log.printf("  kernels have a SIGMA_MAX = ");
@@ -1056,12 +1053,11 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
 
   if(posi_.size()>0)
   {
-    log.printf("  using bias value to control adding value = ");
+    log.printf("  using bias value to control barrier_increment_ value = ");
     for(unsigned i=0; i<ncv_; i++)
       log.printf(" %g",posi_[i]);
     log.printf("\n");
   }
- /////////////////////////////////////// 
   
   if(fixed_sigma_)
     log.printf(" -- FIXED_SIGMA: sigma will not decrease as the simulation proceeds\n");
@@ -1151,14 +1147,12 @@ void OPESmetadCV<mode>::calculate()
   setBias(bias);
   for(unsigned i=0; i<ncv_; i++)
     setOutputForce(i,-kbt_*bias_prefactor_/(prob/Zed_+epsilon_)*der_prob[i]/Zed_);
-  //////////////////////////////////////////////////////////////////////////////////////////////////
   if(acceleration_&&!isFirstStep_)
   {
-    acc_ += static_cast<double>(getStride()) * std::exp((bias+barrier)/(kbt_));
-    const double mean_acc = acc_/((double) getStep());
+    acceleration_factor_ += static_cast<double>(getStride()) * std::exp((bias+barrier)/(kbt_));
+    const double mean_acc = acceleration_factor_/((double) getStep());
     getPntrToComponent("acc")->set(mean_acc);
   }
-  //////////////////////////////////////////////////////////////////////////////////////////////////
 }
 
 template <class mode>
@@ -1172,54 +1166,54 @@ void OPESmetadCV<mode>::update()
       if(getArgument(i) >= 1.0) isMax=true;
     }
     if(isMax) {
-      cvhd_resetwait++;
+      cvhd_reset_wait_++;
       if(monitor_.size()>0) {
         for (unsigned ii=0; ii<monitor_.size(); ++ii)
           filter[ii]=filter[ii]+monitor_[ii]->get();
       }
     } else {
-      cvhd_resetwait=0;
+      cvhd_reset_wait_=0;
       if(monitor_.size()>0) {
         for (unsigned ii=0; ii<monitor_.size(); ++ii) filter[ii]=0;
       }
     }
-    if (cvhd_resetwait >= cvhd_resettime) {
+    if (cvhd_reset_wait_ >= cvhd_reset_time_) {
       if(monitor_.size()>0){
         
         for(unsigned jj=0; jj<monitor_.size(); ++jj) {
-          double averagef=filter[jj] / static_cast<double>(cvhd_resetwait);
+          double averagef=filter[jj] / static_cast<double>(cvhd_reset_wait_);
           if(averagef>cvfiltermax_[jj]) clean_bias=true;
         }       
         if(!clean_bias){
-          cvhd_resetwait=0;
+          cvhd_reset_wait_=0;
           //filter=0;
-          cvhd_fitered_event++;
+          cvhd_filtered_event_count_++;
         }else{
           myinitialize();
-          cvhd_event++;
-          cvhd_resetwait=0;
+          cvhd_event_count_++;
+          cvhd_reset_wait_=0;
           //filter=0;
         }
         for (unsigned ii=0; ii<monitor_.size(); ++ii) filter[ii]=0;
       }else{
-        myinitialize();/////////////////////
-        cvhd_event++;
-        cvhd_resetwait=0;
+        myinitialize();
+        cvhd_event_count_++;
+        cvhd_reset_wait_=0;
         //filter=0;
       }
     }
-    getPntrToComponent("event")->set(cvhd_event);
-    getPntrToComponent("fevent")->set(cvhd_fitered_event);
+    getPntrToComponent("event")->set(cvhd_event_count_);
+    getPntrToComponent("fevent")->set(cvhd_filtered_event_count_);
   }
   if(isFirstStep_)//same in MetaD, useful for restarts?
   {
     isFirstStep_=false;
-    //mycounter++;
+    //fit_sample_counter_++;
     return;
   }
 //update variance if adaptive sigma
-  //if(getOutputQuantity(0)>=adding-barrier)
-    //mycounter++;
+  //if(getOutputQuantity(0)>=barrier_increment_-barrier)
+    //fit_sample_counter_++;
   if(adaptive_sigma_)
   {
     adaptive_counter_++;
@@ -1238,9 +1232,8 @@ void OPESmetadCV<mode>::update()
   }
 
 //do update
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  if(adding>0 && fitsuccess>=waittime_ && !isMax)
+  if(barrier_increment_>0 && stable_fit_windows_>=min_stable_windows_ && !isMax)
   {
     double addvalue;
     if(posi_.size()>0 && slow_>0)    
@@ -1250,13 +1243,13 @@ void OPESmetadCV<mode>::update()
         std::vector<double> der_prob(ncv_,0);
         const double prob=getProbAndDerivatives(posi_,der_prob);
         const double vbias=kbt_*bias_prefactor_*std::log(prob/Zed_+epsilon_)+barrier;
-        addvalue=adding*std::exp(-vbias/(kbt_*slow_));
+        addvalue=barrier_increment_*std::exp(-vbias/(kbt_*slow_));
         getPntrToComponent("posibias")->set(vbias);
       }
       else
       {
         const double vbias=calculate_maximum(posi_);
-        addvalue=adding*std::exp(-vbias/(kbt_*slow_));
+        addvalue=barrier_increment_*std::exp(-vbias/(kbt_*slow_));
         getPntrToComponent("posibias")->set(vbias);
       }
       
@@ -1264,18 +1257,19 @@ void OPESmetadCV<mode>::update()
     }
     else
     {
-      barrier+=adding;
-      addvalue=adding;
+      barrier+=barrier_increment_;
+      addvalue=barrier_increment_;
     }
 
 
-    mycounter_=1;
-    if(!isinput)
+    reweight_count_=1;
+    if(!has_user_biasfactor_)
     {
      biasfactor_=barrier/kbt_;
      bias_prefactor_=1-1./biasfactor_;
     }
-    fitsuccess=0;
+    stable_fit_windows_=0;
+    getPntrToComponent("barrier")->set(barrier);
     getPntrToComponent("count")->set(barrier);
     
     if(mode::explore)
@@ -1283,31 +1277,29 @@ void OPESmetadCV<mode>::update()
       bias_prefactor_=biasfactor_-1;
     }
     epsilon_=std::exp(-barrier/bias_prefactor_/kbt_);
-    mymy=std::pow(epsilon_,bias_prefactor_);
-    //mycounter=0;
+    reweight_sum_=std::pow(epsilon_,bias_prefactor_);
+    //fit_sample_counter_=0;
   }
-  /////////////////////////////////////////////////////////////////////////////////////////////
   /**
   if(getStep()%stride_==0)
   {
-    if(getOutputQuantity(0)<=2.0*adding-barrier)
+    if(getOutputQuantity(0)<=2.0*barrier_increment_-barrier)
     {
-      if(mycounter>=2.0*stride_)
+      if(fit_sample_counter_>=2.0*stride_)
         {
-          mycounter=mycounter-stride_;
-          if(getOutputQuantity(0)<=adding-barrier)
+          fit_sample_counter_=fit_sample_counter_-stride_;
+          if(getOutputQuantity(0)<=barrier_increment_-barrier)
             {              
-              if(mycounter>=addingstride_-6.0*stride_) mycounter=mycounter-3.0*stride_;
-              else mycounter=mycounter-stride_;
+              if(fit_sample_counter_>=barrier_update_stride_-6.0*stride_) fit_sample_counter_=fit_sample_counter_-3.0*stride_;
+              else fit_sample_counter_=fit_sample_counter_-stride_;
             }
         }
       else
         {
-          mycounter=0;
+          fit_sample_counter_=0;
         }
     }
   }**/
-  ////////////////////////////////////////////////////////////////////////////////////////////
 
 
   if(getStep()%stride_==0 && (excluded_region_==NULL || excluded_region_->get()==0))
@@ -1319,11 +1311,10 @@ void OPESmetadCV<mode>::update()
 
     //get new kernel height
     double log_weight=getOutputQuantity(0)/kbt_; //first value is always the current bias
-    if(adding>0)///////////////////////////////////////////////
+    if(barrier_increment_>0)
     {
       log_weight+=barrier/kbt_;
     }
-    /////////////////////////////////////////////////////////////////////////
     for(unsigned e=0; e<extra_biases_.size(); e++)
       log_weight+=extra_biases_[e]->get()/kbt_; //extra biases contribute to the weight
     double height=std::exp(log_weight);
@@ -1342,9 +1333,9 @@ void OPESmetadCV<mode>::update()
       comm.Bcast(sum_heights2,0);
     }
     counter_+=NumWalkers_;
-    mycounter_+=NumWalkers_;
+    reweight_count_+=NumWalkers_;
     sum_weights_+=sum_heights;
-    mymy+=sum_heights;
+    reweight_sum_+=sum_heights;
     sum_weights2_+=sum_heights2;
     
     if(mode::explore)
@@ -1355,7 +1346,7 @@ void OPESmetadCV<mode>::update()
     else
       KDEnorm_=sum_weights_;
 
-    double neff=std::pow(1+sum_weights_,2)/(1+sum_weights2_); //adding 1 makes it more robust at the start
+    double neff=std::pow(1+sum_weights_,2)/(1+sum_weights2_); //barrier_increment_ 1 makes it more robust at the start
     //if needed, rescale sigma and height
     std::vector<double> sigma=sigma0_;
     if(adaptive_sigma_)
@@ -1377,13 +1368,11 @@ void OPESmetadCV<mode>::update()
           for(unsigned i=0; i<ncv_; i++)
             sigma0_[i]=std::max(sigma0_[i],sigma_min_[i]);
         }
-        ///////////////////////////////////////////////////////
         if(sigma_max_.size()>0)
         {
           for(unsigned i=0; i<ncv_; i++)
             sigma0_[i]=std::min(sigma0_[i],sigma_max_[i]);
         }
-        //////////////////////////////////////////////////////
       }
       for(unsigned i=0; i<ncv_; i++)
         sigma[i]=std::sqrt(av_M2_[i]/adaptive_counter_/factor);
@@ -1404,13 +1393,11 @@ void OPESmetadCV<mode>::update()
         for(unsigned i=0; i<ncv_; i++)
           sigma[i]=std::max(sigma[i],sigma_min_[i]);
       }
-      ////////////////////////////////////////////////
       if(sigma_max_.size()>0)
       {
         for(unsigned i=0; i<ncv_; i++)
           sigma[i]=std::min(sigma[i],sigma_max_[i]);
       }
-      ///////////////////////////////////////////////
     }
     if(!fixed_sigma_)
     {
@@ -1427,7 +1414,6 @@ void OPESmetadCV<mode>::update()
     //the height should be divided by sqrt(2*pi)*sigma0_,
     //but this overall factor would be canceled when dividing by Zed
     //thus we skip it altogether, but keep any other sigma rescaling
-    ////////////////////////////////////
     //get new kernel center
     std::vector<double> center(ncv_);
     for(unsigned i=0; i<ncv_; i++)
@@ -1440,7 +1426,6 @@ void OPESmetadCV<mode>::update()
        //sigma[i]=std::min(sigma[i], (1.0-center[i])/4.0);
       //}
     //}
-    ///////////////////////////////////
     for(unsigned i=0; i<ncv_; i++)
       height*=(sigma0_[i]/sigma[i]);
 
@@ -1448,7 +1433,6 @@ void OPESmetadCV<mode>::update()
 
     //add new kernel(s)
     if(NumWalkers_==1)
-    /////////////////////////////////////////////////////////////////////////
     {
       //addKernel(height,center,sigma,log_weight);
       
@@ -1466,23 +1450,23 @@ void OPESmetadCV<mode>::update()
         if(nowadd)
         {
           addKernel(height,center,sigma,log_weight);
-          if (number<addingstride_)
+          if (fit_window_index_<barrier_update_stride_)
             {
-              fit[number]=kbt_*std::log(mymy/mycounter_);
-              number=number+1;
+              fit[fit_window_index_]=kbt_*std::log(reweight_sum_/reweight_count_);
+              fit_window_index_=fit_window_index_+1;
             }
           else
             {
-              number=0;
+              fit_window_index_=0;
               double result=evaluate_slope(fit);
               getPntrToComponent("slo")->set(result);
               if (std::abs(result)<=slope_)
               {
-                fitsuccess=fitsuccess+1;
+                stable_fit_windows_=stable_fit_windows_+1;
               }
               else
               {
-                fitsuccess=0;
+                stable_fit_windows_=0;
               }
             }
         }
@@ -1490,9 +1474,9 @@ void OPESmetadCV<mode>::update()
         {
           KDEnorm_=old_KDEnorm_;
           counter_=counter_-NumWalkers_;
-          mycounter_=mycounter_-NumWalkers_;
+          reweight_count_=reweight_count_-NumWalkers_;
           sum_weights_=sum_weights_-sum_heights;
-          mymy=mymy-sum_heights;
+          reweight_sum_=reweight_sum_-sum_heights;
           sum_weights2_=sum_weights2_-sum_heights2;
         }
       }
@@ -1511,7 +1495,6 @@ void OPESmetadCV<mode>::update()
       }
       
     }
-    ///////////////////////////////////////////////////////////////////////////
     else
     {
       std::vector<double> all_height(NumWalkers_,0.0);
@@ -1570,14 +1553,12 @@ void OPESmetadCV<mode>::update()
     }
 
     getPntrToComponent("rct")->set(kbt_*std::log(sum_weights_/counter_));
-    getPntrToComponent("myrct")->set(kbt_*std::log(mymy/mycounter_));
-    ////////////////////////////////////////
+    getPntrToComponent("myrct")->set(kbt_*std::log(reweight_sum_/reweight_count_));
     
-    neff=std::pow(1+sum_weights_,2)/(1+sum_weights2_); //adding 1 makes it more robust at the start
+    neff=std::pow(1+sum_weights_,2)/(1+sum_weights2_); //barrier_increment_ 1 makes it more robust at the start
     getPntrToComponent("neff")->set(neff);
     //update Zed_
-    /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-    if(!no_Zed_ && delta_kernels_.size()!=0)//////////////////////////////////////////////////////
+    if(!no_Zed_ && delta_kernels_.size()!=0)
     {
       double sum_uprob=0;
       const unsigned ks=kernels_.size();
@@ -1651,7 +1632,6 @@ void OPESmetadCV<mode>::update()
       Zed_=sum_uprob/KDEnorm_/kernels_.size();
       getPntrToComponent("zed")->set(Zed_);
     }
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     //calculate work if requested
     if(calc_work_)
@@ -2174,13 +2154,12 @@ inline void OPESmetadCV<mode>::mergeKernels(kernel& k1,const kernel& k2)
   }
   k1.height=h;
 }
-///////////
 template <class mode>
 void OPESmetadCV<mode>::myinitialize()
 {
   kernels_.clear();
   barrier=barrier_old;
-  if(!isinput)
+  if(!has_user_biasfactor_)
    { 
      biasfactor_=barrier/kbt_;
      bias_prefactor_=1-1./biasfactor_;
@@ -2193,7 +2172,7 @@ void OPESmetadCV<mode>::myinitialize()
   }
 
   sum_weights_=std::pow(epsilon_,bias_prefactor_); //to avoid NANs we start with counter_=1 and w0=exp(beta*V0)
-  mymy=sum_weights_;
+  reweight_sum_=sum_weights_;
   sum_weights2_=sum_weights_*sum_weights_;
   if(no_Zed_)
   { //this makes it more gentle in the initial phase
@@ -2212,18 +2191,17 @@ void OPESmetadCV<mode>::myinitialize()
   isFirstStep_=true;
   adaptive_counter_=0;
   counter_=1;
-  mycounter_=1;
+  reweight_count_=1;
   KDEnorm_=mode::explore?counter_:sum_weights_;
-  ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
   for(unsigned i=0; i<ncv_; i++)
   {
     sigma0_[i]=sigma0_old[i];
   }
   
-  ////////////////////////////////////////////////////////////////////////////////////////////////////////////
   
   Zed_=1;
-  mycounter=0;
+  fit_sample_counter_=0;
+  getPntrToComponent("barrier")->set(barrier);
   getPntrToComponent("count")->set(barrier);
 }
 

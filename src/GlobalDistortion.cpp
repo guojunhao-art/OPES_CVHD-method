@@ -21,6 +21,7 @@
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
 #include "core/Colvar.h"
 #include "core/ActionRegister.h"
+#include "tools/OpenMP.h"
 #include "tools/SwitchingFunction.h"
 
 #include <string>
@@ -30,6 +31,16 @@
 namespace PLMD {
 namespace colvar {
 namespace cvhd {
+
+namespace {
+inline std::size_t triangularPairIndex(const unsigned i, const unsigned j, const unsigned n) {
+  return static_cast<std::size_t>(i) * (2u * n - i - 1u) / 2u + (j - i - 1u);
+}
+
+inline std::size_t rectangularPairIndex(const unsigned i, const unsigned j, const unsigned num_a, const unsigned num_b) {
+  return static_cast<std::size_t>(i) * (num_b - num_a) + (j - num_a);
+}
+}
 
 //+PLUMEDOC COLVAR GLOBALDISTORTION
 /*
@@ -213,27 +224,43 @@ GlobalDistortion::GlobalDistortion(const ActionOptions&ao):
 void GlobalDistortion::calculate() {
   if (reBuildReflist) buildReflist();
 
-  int k = 0;
+  const unsigned nat = getNumberOfAtoms();
+  const unsigned nthreads = OpenMP::getNumThreads();
   double pairsum = 0.0;
   double prefactor;
   double value;
-  Vector distance;
-  std::vector<Vector> deriv(getNumberOfAtoms());
+  std::vector<Vector> deriv(nat);
   Tensor virial;
 
-  if(!twogroups) {
-    for(unsigned i = 0; i < num_a; i++) {
-      for(unsigned j = i+1; j < num_a; j++) {
-        if(checklist[k]) pairsum += pairterm(i, j, reflist[k], deriv, virial);
-        k++;
+  #pragma omp parallel num_threads(nthreads)
+  {
+    double local_pairsum = 0.0;
+    Tensor local_virial;
+    std::vector<Vector> local_deriv(nat);
+
+    if(!twogroups) {
+      #pragma omp for schedule(static) nowait
+      for(unsigned i = 0; i < num_a; i++) {
+        for(unsigned j = i+1; j < num_a; j++) {
+          const std::size_t k = triangularPairIndex(i, j, num_a);
+          if(checklist[k]) local_pairsum += pairterm(i, j, reflist[k], local_deriv, local_virial);
+        }
+      }
+    } else {
+      #pragma omp for schedule(static) nowait
+      for(unsigned i = 0; i < num_a; i++) {
+        for(unsigned j = num_a; j < num_b; j++) {
+          const std::size_t k = rectangularPairIndex(i, j, num_a, num_b);
+          if(checklist[k]) local_pairsum += pairterm(i, j, reflist[k], local_deriv, local_virial);
+        }
       }
     }
-  } else {
-    for(unsigned i = 0; i < num_a; i++) {
-      for(unsigned j = num_a; j < num_b; j++) {
-        if(checklist[k]) pairsum += pairterm(i, j, reflist[k], deriv, virial);
-        k++;
-      }
+
+    #pragma omp critical
+    {
+      pairsum += local_pairsum;
+      virial += local_virial;
+      for(unsigned a=0; a<nat; ++a) deriv[a] += local_deriv[a];
     }
   }
 
@@ -270,16 +297,17 @@ void GlobalDistortion::calculate() {
 
 void GlobalDistortion::buildReflist() {
   reBuildReflist = false;
-  reflist.clear();
-  checklist.clear();
-
-  Vector distance;
-  double val, dummy;
-  bool consider;
+  const unsigned pair_count = (!twogroups) ? num_a*(num_a-1)/2 : num_a*(num_b-num_a);
+  reflist.assign(pair_count,0.0);
+  checklist.assign(pair_count,false);
 
   if(!twogroups) {
+    #pragma omp parallel for schedule(static)
     for(unsigned i = 0; i < num_a; i++) {
       for(unsigned j = i+1; j < num_a; j++) {
+        Vector distance;
+        double val;
+        double dummy=0.0;
         if(pbc) {
           distance = pbcDistance(getPosition(i),getPosition(j));
         } else {
@@ -287,15 +315,20 @@ void GlobalDistortion::buildReflist() {
         }
         val = distance.modulo();
         if(useSwitch) val = switchingFunction.calculate(val,dummy);
-        consider = true;
+        bool consider = true;
         if(use_cutoff && (val < ref_min || val > ref_max)) consider = false;
-        reflist.push_back(getRefval(val));
-        checklist.push_back(consider);
+        const std::size_t k = triangularPairIndex(i, j, num_a);
+        reflist[k]=getRefval(val);
+        checklist[k]=consider;
       }
     }
   } else {
+    #pragma omp parallel for schedule(static)
     for(unsigned i = 0; i < num_a; i++) {
       for(unsigned j = num_a; j < num_b; j++) {
+        Vector distance;
+        double val;
+        double dummy=0.0;
         if(pbc) {
           distance = pbcDistance(getPosition(i),getPosition(j));
         } else {
@@ -303,25 +336,27 @@ void GlobalDistortion::buildReflist() {
         }
         val = distance.modulo();
         if(useSwitch) val = switchingFunction.calculate(val,dummy);
-        consider = true;
+        bool consider = true;
         if(use_cutoff && (val < ref_min || val > ref_max)) consider = false;
-        reflist.push_back(getRefval(val));
-        checklist.push_back(consider);
+        const std::size_t k = rectangularPairIndex(i, j, num_a, num_b);
+        reflist[k]=getRefval(val);
+        checklist[k]=consider;
       }
     }
   }
 }
 
 void GlobalDistortion::buildNeigbourlist() {
-  checklist.clear();
-
-  Vector distance;
-  double val, dummy;
-  bool consider;
+  const unsigned pair_count = (!twogroups) ? num_a*(num_a-1)/2 : num_a*(num_b-num_a);
+  checklist.assign(pair_count,false);
 
   if(!twogroups) {
+    #pragma omp parallel for schedule(static)
     for(unsigned i = 0; i < num_a; i++) {
       for(unsigned j = i+1; j < num_a; j++) {
+        Vector distance;
+        double val;
+        double dummy=0.0;
         if(pbc) {
           distance = pbcDistance(getPosition(i),getPosition(j));
         } else {
@@ -329,14 +364,19 @@ void GlobalDistortion::buildNeigbourlist() {
         }
         val = distance.modulo();
         if(useSwitch) val = switchingFunction.calculate(val,dummy);
-        consider = true;
+        bool consider = true;
         if(use_cutoff && (val < ref_min || val > ref_max)) consider = false;
-        checklist.push_back(consider);
+        const std::size_t k = triangularPairIndex(i, j, num_a);
+        checklist[k]=consider;
       }
     }
   } else {
+    #pragma omp parallel for schedule(static)
     for(unsigned i = 0; i < num_a; i++) {
       for(unsigned j = num_a; j < num_b; j++) {
+        Vector distance;
+        double val;
+        double dummy=0.0;
         if(pbc) {
           distance = pbcDistance(getPosition(i),getPosition(j));
         } else {
@@ -344,9 +384,10 @@ void GlobalDistortion::buildNeigbourlist() {
         }
         val = distance.modulo();
         if(useSwitch) val = switchingFunction.calculate(val,dummy);
-        consider = true;
+        bool consider = true;
         if(use_cutoff && (val < ref_min || val > ref_max)) consider = false;
-        checklist.push_back(consider);
+        const std::size_t k = rectangularPairIndex(i, j, num_a, num_b);
+        checklist[k]=consider;
       }
     }
   }
