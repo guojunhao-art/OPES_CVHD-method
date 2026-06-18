@@ -1,7 +1,7 @@
 UNITS LENGTH=A TIME=ps ENERGY=eV
-LOAD FILE= OPESmetadCV.cpp
-LOAD FILE= CVHDM.cpp
-LOAD FILE= GlobalDistortion.cpp
+LOAD FILE=./OPESmetadCV.cpp
+LOAD FILE=./CVHDM.cpp
+LOAD FILE=./GlobalDistortion.cpp
 
 GLOBALDISTORTION ...
 label=cu
