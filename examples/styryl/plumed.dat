@@ -1,7 +1,7 @@
 UNITS LENGTH=A ENERGY=kcal/mol TIME=fs
-LOAD FILE= OPESmetadCV.cpp
-LOAD FILE= CVHDM.cpp
-LOAD FILE= GlobalDistortion.cpp
+LOAD FILE=./OPESmetadCV.cpp
+LOAD FILE=./CVHDM.cpp
+LOAD FILE=./GlobalDistortion.cpp
 
 c: COM ATOMS=12-15
 DISTANCE ATOMS=4,c LABEL=d
