@@ -1,6 +1,6 @@
 UNITS LENGTH=A ENERGY=kcal/mol TIME=fs
-LOAD FILE= CVHDM.cpp
-LOAD FILE= GlobalDistortion.cpp
+LOAD FILE=./CVHDM.cpp
+LOAD FILE=./GlobalDistortion.cpp
 
 GLOBALDISTORTION ...
 label=ccbb
