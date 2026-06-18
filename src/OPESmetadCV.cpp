@@ -551,6 +551,11 @@ OPESmetadCV<mode>::OPESmetadCV(const ActionOptions& ao)
     cutoff=sqrt(2.*barrier/kbt_); //otherwise it is too small
   cvhd=false;
   parseFlag("CVHD",cvhd);
+  if(mode::explore && cvhd)
+  {
+    plumed_merror("CVHD is not supported with OPES_METAD_EXPLORECV. "
+                  "Please use OPES_METADCV with the CVHD flag for OPES_CVHD simulations.");
+  }
   parse("CVHD_RESETTIME",cvhd_reset_time_);
   if (cvhd)
   {
