@@ -1,5 +1,5 @@
 /* ----------------------------------------------------------------------
-   USER-CVHD: V3k-hybrid-perf reference implementation of global-distortion CVs for LAMMPS
+   USER-CVHD: V3s-cleanup reference implementation of global-distortion CVs for LAMMPS
 
    CPU validation target:
      - builds C-C and C-H reference-bond lists from the LAMMPS neighbor list
@@ -9,7 +9,7 @@
      - computes CVHDM-style projected cv1/cv2 variables
      - applies a simple harmonic bias on cv1 to validate breaking forces
 
-   V3k-hybrid-perf uses hybrid Kokkos CVs (reference-pair breaking, fused-neighbor formation), fused local force application, dirty tag-map caching, and an optional Kokkos reference-pair collector.
+   V3s-cleanup uses hybrid Kokkos CVs (reference-pair breaking, fused-neighbor formation), fused local force application, dirty tag-map caching, and an optional Kokkos reference-pair collector.
 ------------------------------------------------------------------------- */
 
 #include "fix_cvhd_global_distortion.h"
@@ -109,9 +109,12 @@ void FixCvhdGlobalDistortion::set_defaults()
   carbon_type_ = -1;
   hydrogen_type_ = -1;
 
-  output_file_ = "cvhd_v3k.colvar";
+  output_file_ = "cvhd_v3s_cleanup.colvar";
   output_stride_ = 100;
   compute_stride_ = 1;
+
+
+  h_event_scan_enable_ = true;
 
   kk_pair_cache_policy_ = "safe";
 
@@ -286,6 +289,9 @@ void FixCvhdGlobalDistortion::setup(int)
     reference_changed = true;
   }
 
+  build_initial_ambiguous_pairs();
+  backend_on_recent_cc_exclusions_changed();
+
   if (reference_changed) backend_on_reference_pairs_changed();
   if (connectivity_changed) backend_on_connectivity_changed();
 
@@ -297,7 +303,6 @@ void FixCvhdGlobalDistortion::setup(int)
   }
 
   write_output();
-
   if (!summary_printed_) {
     print_summary();
     summary_printed_ = true;
@@ -612,6 +617,12 @@ int FixCvhdGlobalDistortion::backend_neighbor_request_flags() const
   return NeighConst::REQ_DEFAULT;
 }
 
+bool FixCvhdGlobalDistortion::backend_collect_cc_formation_event_pairs(double,
+                                                                       std::vector<PairRef> &)
+{
+  return false;
+}
+
 void FixCvhdGlobalDistortion::backend_on_reference_pairs_changed()
 {
   // CPU backend has no mirrored device arrays to update.
@@ -622,6 +633,11 @@ void FixCvhdGlobalDistortion::backend_on_connectivity_changed()
 {
   // CPU backend has no mirrored device connectivity table to update.
   // A future /kk subclass will rebuild/sync device C-C partner-tag views here.
+}
+
+void FixCvhdGlobalDistortion::backend_on_recent_cc_exclusions_changed()
+{
+  // CPU backend has no device-side exclusion cache.
 }
 
 void FixCvhdGlobalDistortion::backend_compute_raw_cvs(double &ccbb, double &chbb, double &ccbf)
@@ -1096,21 +1112,35 @@ void FixCvhdGlobalDistortion::cvhd_perform_reset()
   opes_update_barrier_dependent_parameters();
   opes_reset_history();
 
-  // Rebuild reference states and C-C connectivity from the current structure.
+  // V3s-cleanup: event-local candidate update.  Do not rebuild the global reference
+  // lists from a single reset frame.  Only pairs that actually crossed the
+  // derived TS boundary during this CVHD event enter the ambiguous list.
   bool reference_changed = false;
   bool connectivity_changed = false;
 
-  build_tag_map();
-  if (cc_break_.enabled) {
-    build_reference_pairs(cc_break_);
+  ensure_tag_map_current();
+
+  // First reclassify pairs already in the ambiguous window.  If they have moved
+  // below break_rmax they can become bonded; if they have moved beyond the
+  // derived TS bound they become nonbonded; otherwise they remain ambiguous.
+  if (update_ambiguous_pair_states()) {
     reference_changed = true;
-    rebuild_cc_connectivity_from_cc_break_pairs();
     connectivity_changed = true;
   }
-  if (ch_break_.enabled) {
-    build_reference_pairs(ch_break_);
+
+  if (process_h_event_set_cpu()) {
     reference_changed = true;
+    connectivity_changed = true;
   }
+
+  // Then process only event-local crossing pairs:
+  //   breaking: existing bonded pairs with r > TS
+  //   formation: current unbonded C-C candidates with r below formation TS
+  process_cvhd_event_local_pairs();
+  reference_changed = true;
+  connectivity_changed = true;
+
+  backend_on_recent_cc_exclusions_changed();
 
   if (reference_changed) backend_on_reference_pairs_changed();
   if (connectivity_changed) backend_on_connectivity_changed();
@@ -1325,6 +1355,11 @@ void FixCvhdGlobalDistortion::apply_breaking_forces(const TermConfig &term, doub
   const double term_prefactor = std::pow(raw_value, 1.0 - static_cast<double>(term.power));
 
   for (const PairRef &p : term.pairs) {
+    if (term.kind == CC_PAIR && cc_pair_ambiguous_tags(p.itag, p.jtag)) continue;
+    if (term.kind == CH_PAIR && ch_pair_ambiguous_tags(p.itag, p.jtag)) continue;
+    if (!term.do_form && term.kind == CC_PAIR && cc_pair_ambiguous_tags(p.itag, p.jtag)) continue;
+    if (!term.do_form && term.kind == CH_PAIR && ch_pair_ambiguous_tags(p.itag, p.jtag)) continue;
+
     const auto ii = tag_to_local_.find(p.itag);
     const auto jj = tag_to_local_.find(p.jtag);
     if (ii == tag_to_local_.end() || jj == tag_to_local_.end()) continue;
@@ -1574,6 +1609,634 @@ void FixCvhdGlobalDistortion::rebuild_cc_break_pairs_from_connectivity()
   }
 }
 
+std::uint64_t FixCvhdGlobalDistortion::pack_cc_pair_indices(int ci, int cj) const
+{
+  if (cj < ci) std::swap(ci, cj);
+  return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ci)) << 32) |
+         static_cast<std::uint32_t>(cj);
+}
+
+std::uint64_t FixCvhdGlobalDistortion::pack_ch_pair_index_tag(int ci, tagint htag) const
+{
+  return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ci)) << 32) |
+         static_cast<std::uint32_t>(htag);
+}
+
+bool FixCvhdGlobalDistortion::cc_pair_recently_broken_indices(int ci, int cj) const
+{
+  return ambiguous_cc_pairs_.find(pack_cc_pair_indices(ci, cj)) != ambiguous_cc_pairs_.end();
+}
+
+bool FixCvhdGlobalDistortion::cc_pair_recently_formed_indices(int ci, int cj) const
+{
+  return ambiguous_cc_pairs_.find(pack_cc_pair_indices(ci, cj)) != ambiguous_cc_pairs_.end();
+}
+
+bool FixCvhdGlobalDistortion::cc_pair_recently_broken_tags(tagint itag, tagint jtag) const
+{
+  return cc_pair_ambiguous_tags(itag, jtag);
+}
+
+bool FixCvhdGlobalDistortion::cc_pair_recently_formed_tags(tagint itag, tagint jtag) const
+{
+  return cc_pair_ambiguous_tags(itag, jtag);
+}
+
+bool FixCvhdGlobalDistortion::cc_pair_ambiguous_indices(int ci, int cj) const
+{
+  return ambiguous_cc_pairs_.find(pack_cc_pair_indices(ci, cj)) != ambiguous_cc_pairs_.end();
+}
+
+bool FixCvhdGlobalDistortion::cc_pair_ambiguous_tags(tagint itag, tagint jtag) const
+{
+  const auto ii = carbon_tag_to_index_.find(itag);
+  const auto jj = carbon_tag_to_index_.find(jtag);
+  if (ii == carbon_tag_to_index_.end() || jj == carbon_tag_to_index_.end()) return false;
+  return cc_pair_ambiguous_indices(ii->second, jj->second);
+}
+
+bool FixCvhdGlobalDistortion::ch_pair_ambiguous_tags(tagint itag, tagint jtag) const
+{
+  const auto ii = carbon_tag_to_index_.find(itag);
+  const auto jj = carbon_tag_to_index_.find(jtag);
+  int ci = -1;
+  tagint htag = 0;
+  if (ii != carbon_tag_to_index_.end()) {
+    ci = ii->second;
+    htag = jtag;
+  } else if (jj != carbon_tag_to_index_.end()) {
+    ci = jj->second;
+    htag = itag;
+  } else {
+    return false;
+  }
+  return ambiguous_ch_pairs_.find(pack_ch_pair_index_tag(ci, htag)) != ambiguous_ch_pairs_.end();
+}
+
+void FixCvhdGlobalDistortion::record_recently_broken_cc(tagint itag, tagint jtag)
+{
+  const auto ii = carbon_tag_to_index_.find(itag);
+  const auto jj = carbon_tag_to_index_.find(jtag);
+  if (ii == carbon_tag_to_index_.end() || jj == carbon_tag_to_index_.end()) return;
+  ambiguous_cc_pairs_.insert(pack_cc_pair_indices(ii->second, jj->second));
+  rebuild_directional_cc_exclusions_from_ambiguous();
+}
+
+void FixCvhdGlobalDistortion::record_recently_formed_cc(tagint itag, tagint jtag)
+{
+  record_recently_broken_cc(itag, jtag);
+}
+
+void FixCvhdGlobalDistortion::rebuild_directional_cc_exclusions_from_ambiguous()
+{
+  recently_broken_cc_pairs_ = ambiguous_cc_pairs_;
+  recently_formed_cc_pairs_ = ambiguous_cc_pairs_;
+}
+
+void FixCvhdGlobalDistortion::clear_recent_cc_event_exclusions()
+{
+  ambiguous_cc_pairs_.clear();
+  ambiguous_ch_pairs_.clear();
+  rebuild_directional_cc_exclusions_from_ambiguous();
+}
+
+
+bool FixCvhdGlobalDistortion::update_ambiguous_pair_states()
+{
+  bool changed = false;
+
+  const double cc_bond = cc_break_.rmax;
+  const double ch_bond = ch_break_.rmax;
+  const double cc_ts = cc_break_.ref * (1.0 + cv1_cutoff_cc_);
+  const double ch_ts = ch_break_.ref * (1.0 + cv1_cutoff_ch_);
+
+  std::unordered_set<std::uint64_t> keep_cc;
+  for (const auto key : ambiguous_cc_pairs_) {
+    const int ci = static_cast<int>(key >> 32);
+    const int cj = static_cast<int>(key & 0xffffffffu);
+    if (ci < 0 || cj < 0 ||
+        static_cast<std::size_t>(ci) >= carbon_tags_.size() ||
+        static_cast<std::size_t>(cj) >= carbon_tags_.size()) {
+      changed = true;
+      continue;
+    }
+
+    const auto ii = tag_to_local_.find(carbon_tags_[ci]);
+    const auto jj = tag_to_local_.find(carbon_tags_[cj]);
+    if (ii == tag_to_local_.end() || jj == tag_to_local_.end()) {
+      set_cc_connected(carbon_tags_[ci], carbon_tags_[cj], false);
+      changed = true;
+      continue;
+    }
+
+    const double r = pair_distance(ii->second, jj->second);
+    if (r < cc_bond) {
+      set_cc_connected(carbon_tags_[ci], carbon_tags_[cj], true);
+      changed = true;
+    } else if (r > cc_ts) {
+      set_cc_connected(carbon_tags_[ci], carbon_tags_[cj], false);
+      changed = true;
+    } else {
+      keep_cc.insert(key);
+    }
+  }
+  ambiguous_cc_pairs_.swap(keep_cc);
+
+  auto remove_all_ch_pairs_for_h = [&](tagint htag) {
+    const std::size_t old_size = ch_break_.pairs.size();
+    ch_break_.pairs.erase(std::remove_if(ch_break_.pairs.begin(), ch_break_.pairs.end(),
+                                         [&](const PairRef &p) {
+                                           return p.itag == htag || p.jtag == htag;
+                                         }),
+                          ch_break_.pairs.end());
+    if (ch_break_.pairs.size() != old_size) changed = true;
+  };
+
+  auto add_single_ch_pair_for_h = [&](tagint ctag, tagint htag) {
+    remove_all_ch_pairs_for_h(htag);
+
+    tagint a = ctag;
+    tagint b = htag;
+    if (b < a) std::swap(a,b);
+
+    PairRef p;
+    p.itag = a;
+    p.jtag = b;
+    p.ref = ch_break_.ref;
+    ch_break_.pairs.push_back(p);
+    changed = true;
+  };
+
+  struct CHCandidate {
+    int ci = -1;
+    tagint htag = 0;
+    std::uint64_t key = 0;
+    double r = -1.0;
+    bool visible = false;
+  };
+
+  std::unordered_map<tagint, std::vector<CHCandidate>> by_h;
+  by_h.reserve(ambiguous_ch_pairs_.size());
+
+  for (const auto key : ambiguous_ch_pairs_) {
+    const int ci = static_cast<int>(key >> 32);
+    const tagint htag = static_cast<tagint>(key & 0xffffffffu);
+
+    CHCandidate c;
+    c.ci = ci;
+    c.htag = htag;
+    c.key = key;
+
+    if (ci >= 0 && static_cast<std::size_t>(ci) < carbon_tags_.size()) {
+      const auto ii = tag_to_local_.find(carbon_tags_[ci]);
+      const auto jj = tag_to_local_.find(htag);
+      if (ii != tag_to_local_.end() && jj != tag_to_local_.end()) {
+        c.r = pair_distance(ii->second, jj->second);
+        c.visible = true;
+      }
+    }
+
+    by_h[htag].push_back(c);
+  }
+
+  std::unordered_set<std::uint64_t> keep_ch;
+  std::size_t ch_to_bonded = 0;
+  std::size_t ch_stay_amb = 0;
+  std::size_t ch_to_free = 0;
+
+  for (auto &kv : by_h) {
+    const tagint htag = kv.first;
+    std::vector<CHCandidate> &cand = kv.second;
+
+    CHCandidate *best_bonded = nullptr;
+    std::vector<CHCandidate*> amb_candidates;
+
+    for (CHCandidate &c : cand) {
+      if (!c.visible) continue;
+
+      if (c.r < ch_bond) {
+        if (!best_bonded || c.r < best_bonded->r) best_bonded = &c;
+      } else if (c.r <= ch_ts) {
+        amb_candidates.push_back(&c);
+      }
+    }
+
+    if (best_bonded) {
+      const tagint ctag = carbon_tags_[best_bonded->ci];
+      add_single_ch_pair_for_h(ctag, htag);
+      h_event_set_.erase(htag);
+      ++ch_to_bonded;
+      continue;
+    }
+
+    if (!amb_candidates.empty()) {
+      for (const CHCandidate *c : amb_candidates) {
+        keep_ch.insert(c->key);
+      }
+      h_event_set_.erase(htag);
+      ch_stay_amb += amb_candidates.size();
+      continue;
+    }
+
+    remove_all_ch_pairs_for_h(htag);
+    h_event_set_.insert(htag);
+    ++ch_to_free;
+    changed = true;
+  }
+
+  if (keep_ch.size() != ambiguous_ch_pairs_.size()) changed = true;
+  ambiguous_ch_pairs_.swap(keep_ch);
+
+  if (changed) rebuild_cc_break_pairs_from_connectivity();
+  rebuild_directional_cc_exclusions_from_ambiguous();
+
+  if (comm->me == 0 && changed) {
+    utils::logmesg(lmp,
+                   "fix cvhd/global/distortion: candidate-state reclassify at step {}: active ambiguous C-C={}, active ambiguous C-H={}, h_event={}, CH bonded={}, CH stay_amb={}, CH free={}, connected C-C={}, connected C-H={}\n",
+                   update->ntimestep, ambiguous_cc_pairs_.size(), ambiguous_ch_pairs_.size(),
+                   h_event_set_.size(), ch_to_bonded, ch_stay_amb, ch_to_free,
+                   cc_break_.pairs.size(), ch_break_.pairs.size());
+  }
+
+  return changed;
+}
+
+bool FixCvhdGlobalDistortion::process_h_event_set_cpu()
+{
+  if (!h_event_scan_enable_) return false;
+  if (h_event_set_.empty()) return false;
+
+  backend_sync_host_atoms_for_reference();
+
+  double **x = atom->x;
+  int *type = atom->type;
+  tagint *tag = atom->tag;
+
+  const int nall = atom->nlocal + atom->nghost;
+  const double ch_bond = ch_break_.rmax;
+  const double ch_ts = ch_break_.ref * (1.0 + cv1_cutoff_ch_);
+  const double ch_ts2 = ch_ts * ch_ts;
+
+  bool changed = false;
+  std::unordered_set<tagint> next_h_event;
+  next_h_event.reserve(h_event_set_.size());
+
+  std::size_t h_to_bonded = 0;
+  std::size_t h_to_amb = 0;
+  std::size_t h_stay_free = 0;
+
+  auto remove_all_ch_pairs_for_h = [&](tagint htag) {
+    ch_break_.pairs.erase(std::remove_if(ch_break_.pairs.begin(), ch_break_.pairs.end(),
+                                         [&](const PairRef &p) {
+                                           return p.itag == htag || p.jtag == htag;
+                                         }),
+                          ch_break_.pairs.end());
+  };
+
+  auto add_single_ch_pair_for_h = [&](tagint ctag, tagint htag) {
+    remove_all_ch_pairs_for_h(htag);
+
+    tagint a = ctag;
+    tagint b = htag;
+    if (b < a) std::swap(a,b);
+
+    PairRef p;
+    p.itag = a;
+    p.jtag = b;
+    p.ref = ch_break_.ref;
+    ch_break_.pairs.push_back(p);
+  };
+
+  for (tagint htag : h_event_set_) {
+    const auto ih = tag_to_local_.find(htag);
+    if (ih == tag_to_local_.end()) {
+      next_h_event.insert(htag);
+      ++h_stay_free;
+      continue;
+    }
+
+    int best_bond_ci = -1;
+    tagint best_bond_ctag = 0;
+    double best_bond_r = 1.0e100;
+    std::vector<std::uint64_t> amb_keys;
+
+    for (int j = 0; j < nall; ++j) {
+      if (!in_fix_group(j) || type[j] != carbon_type_) continue;
+
+      double dx = x[j][0] - x[ih->second][0];
+      double dy = x[j][1] - x[ih->second][1];
+      double dz = x[j][2] - x[ih->second][2];
+      if (domain->periodicity[0] || domain->periodicity[1] || domain->periodicity[2]) {
+        domain->minimum_image(FLERR, dx, dy, dz);
+      }
+
+      const double rsq = dx*dx + dy*dy + dz*dz;
+      if (rsq > ch_ts2 || rsq <= 0.0) continue;
+
+      const double r = std::sqrt(rsq);
+      const auto ci_it = carbon_tag_to_index_.find(tag[j]);
+      if (ci_it == carbon_tag_to_index_.end()) continue;
+
+      if (r < ch_bond) {
+        if (r < best_bond_r) {
+          best_bond_r = r;
+          best_bond_ci = ci_it->second;
+          best_bond_ctag = tag[j];
+        }
+      } else {
+        amb_keys.push_back(pack_ch_pair_index_tag(ci_it->second, htag));
+      }
+    }
+
+    if (best_bond_ci >= 0) {
+      add_single_ch_pair_for_h(best_bond_ctag, htag);
+      ++h_to_bonded;
+      changed = true;
+      continue;
+    }
+
+    if (!amb_keys.empty()) {
+      for (const auto key : amb_keys) ambiguous_ch_pairs_.insert(key);
+      ++h_to_amb;
+      changed = true;
+      continue;
+    }
+
+    next_h_event.insert(htag);
+    ++h_stay_free;
+  }
+
+  h_event_set_.swap(next_h_event);
+
+  if (changed) {
+    rebuild_directional_cc_exclusions_from_ambiguous();
+    backend_on_recent_cc_exclusions_changed();
+  }
+
+  if (comm->me == 0) {
+    utils::logmesg(lmp,
+                   "fix cvhd/global/distortion: H-event scan at step {}: H->bonded={}, H->ambiguous={}, H_stay_free={}, active h_event={}, ambiguous C-H={}, connected C-H={}\n",
+                   update->ntimestep, h_to_bonded, h_to_amb, h_stay_free,
+                   h_event_set_.size(), ambiguous_ch_pairs_.size(), ch_break_.pairs.size());
+  }
+
+  return changed;
+}
+
+void FixCvhdGlobalDistortion::process_cvhd_event_local_pairs()
+{
+  const double cc_ts = cc_break_.ref * (1.0 + cv1_cutoff_cc_);
+  const double ch_ts = ch_break_.ref * (1.0 + cv1_cutoff_ch_);
+  const double cc_ts2 = cc_ts * cc_ts;
+
+  std::size_t cc_break_to_amb = 0;
+  std::size_t ch_break_to_amb = 0;
+  std::size_t cc_form_to_amb = 0;
+  // C-C breaking: only existing connected pairs that crossed the TS-like bound
+  // are moved out of connectivity and into the ambiguous list.  Other elongated
+  // but sub-TS pairs remain in the bonded/reference list.
+  std::vector<PairRef> cc_pairs_snapshot = cc_break_.pairs;
+  for (const PairRef &p : cc_pairs_snapshot) {
+    if (cc_pair_ambiguous_tags(p.itag, p.jtag)) continue;
+
+    const auto ii = tag_to_local_.find(p.itag);
+    const auto jj = tag_to_local_.find(p.jtag);
+
+    bool crossed = false;
+    if (ii == tag_to_local_.end() || jj == tag_to_local_.end()) {
+      crossed = true;
+    } else {
+      const double r = pair_distance(ii->second, jj->second);
+      crossed = (r > cc_ts);
+    }
+
+    if (crossed) {
+      const auto ci = carbon_tag_to_index_.find(p.itag);
+      const auto cj = carbon_tag_to_index_.find(p.jtag);
+      if (ci != carbon_tag_to_index_.end() && cj != carbon_tag_to_index_.end()) {
+        ambiguous_cc_pairs_.insert(pack_cc_pair_indices(ci->second, cj->second));
+        set_cc_connected(p.itag, p.jtag, false);
+        ++cc_break_to_amb;
+      }
+    }
+  }
+
+  // C-H breaking: same event-local TS crossing rule.
+  std::vector<PairRef> new_ch_pairs;
+  new_ch_pairs.reserve(ch_break_.pairs.size());
+  for (const PairRef &p : ch_break_.pairs) {
+    if (ch_pair_ambiguous_tags(p.itag, p.jtag)) continue;
+
+    const auto ii = tag_to_local_.find(p.itag);
+    const auto jj = tag_to_local_.find(p.jtag);
+
+    bool crossed = false;
+    if (ii == tag_to_local_.end() || jj == tag_to_local_.end()) {
+      crossed = true;
+    } else {
+      const double r = pair_distance(ii->second, jj->second);
+      crossed = (r > ch_ts);
+    }
+
+    if (crossed) {
+      tagint ctag = 0;
+      tagint htag = 0;
+      const auto ci = carbon_tag_to_index_.find(p.itag);
+      const auto cj = carbon_tag_to_index_.find(p.jtag);
+      if (ci != carbon_tag_to_index_.end()) {
+        ctag = p.itag;
+        htag = p.jtag;
+        ambiguous_ch_pairs_.insert(pack_ch_pair_index_tag(ci->second, htag));
+        h_event_set_.erase(htag);
+        ++ch_break_to_amb;
+      } else if (cj != carbon_tag_to_index_.end()) {
+        ctag = p.jtag;
+        htag = p.itag;
+        ambiguous_ch_pairs_.insert(pack_ch_pair_index_tag(cj->second, htag));
+        h_event_set_.erase(htag);
+        ++ch_break_to_amb;
+      }
+    } else {
+      new_ch_pairs.push_back(p);
+    }
+  }
+  ch_break_.pairs.swap(new_ch_pairs);
+
+  rebuild_cc_break_pairs_from_connectivity();
+
+  // C-C formation: only if cv2 was actually in the event region.  V3s-cleanup uses a
+  // backend collector here because in /kk mode list_->firstneigh is not a valid
+  // standard host neighbor list.  The Kokkos backend scans the device list and
+  // returns candidate tag pairs.
+  if (opes_use_cv2_ && values_[4] >= cvhd_event_threshold_ && cc_form_.enabled) {
+    const double form_threshold = (cc_form_bond_threshold_ > 0.0)
+                                ? cc_form_bond_threshold_
+                                : cc_form_.ref * (1.0 - cv2_cutoff_ccform_);
+
+    std::vector<PairRef> local_forms;
+    const bool collected_by_backend =
+      backend_collect_cc_formation_event_pairs(form_threshold, local_forms);
+
+    if (!collected_by_backend) {
+      if (!list_) {
+        error->all(FLERR,
+                   "fix cvhd/global/distortion needs a neighbor list for event-local C-C formation scan");
+      }
+
+      backend_sync_host_atoms_for_reference();
+
+      double **x = atom->x;
+      int *type = atom->type;
+      tagint *tag = atom->tag;
+
+      const int inum = list_->inum;
+      int *ilist = list_->ilist;
+      int *numneigh = list_->numneigh;
+      int **firstneigh = list_->firstneigh;
+
+      const double form_threshold2 = form_threshold * form_threshold;
+      const double cand2 = (cc_form_candidate_rmax_ > 0.0)
+                         ? cc_form_candidate_rmax_ * cc_form_candidate_rmax_
+                         : -1.0;
+
+      for (int ii = 0; ii < inum; ++ii) {
+        const int i = ilist[ii];
+        if (!in_fix_group(i) || type[i] != carbon_type_) continue;
+
+        int *jlist = firstneigh[i];
+        const int jnum = numneigh[i];
+
+        for (int jj = 0; jj < jnum; ++jj) {
+          const int j = jlist[jj] & NEIGHMASK;
+          if (!in_fix_group(j) || type[j] != carbon_type_) continue;
+
+          const tagint itag = tag[i];
+          const tagint jtag = tag[j];
+
+          if (are_cc_connected(itag, jtag)) continue;
+          if (cc_pair_ambiguous_tags(itag, jtag)) continue;
+
+          double dx = x[j][0] - x[i][0];
+          double dy = x[j][1] - x[i][1];
+          double dz = x[j][2] - x[i][2];
+          if (domain->periodicity[0] || domain->periodicity[1] || domain->periodicity[2]) {
+            domain->minimum_image(FLERR,dx,dy,dz);
+          }
+
+          const double rsq = dx*dx + dy*dy + dz*dz;
+          if (cand2 > 0.0 && rsq > cand2) continue;
+          if (rsq > form_threshold2) continue;
+
+          PairRef p;
+          p.itag = itag;
+          p.jtag = jtag;
+          if (p.jtag < p.itag) std::swap(p.itag, p.jtag);
+          p.ref = cc_break_.ref;
+          local_forms.push_back(p);
+        }
+      }
+    }
+
+    std::vector<PairRef> global_forms;
+    gather_unique_event_pairs(local_forms, global_forms);
+
+    for (const PairRef &p : global_forms) {
+      const auto ci = carbon_tag_to_index_.find(p.itag);
+      const auto cj = carbon_tag_to_index_.find(p.jtag);
+      if (ci == carbon_tag_to_index_.end() || cj == carbon_tag_to_index_.end()) continue;
+      if (cc_pair_ambiguous_indices(ci->second, cj->second)) continue;
+      if (are_cc_connected(p.itag, p.jtag)) continue;
+
+      ambiguous_cc_pairs_.insert(pack_cc_pair_indices(ci->second, cj->second));
+      ++cc_form_to_amb;
+    }
+  }
+
+  rebuild_directional_cc_exclusions_from_ambiguous();
+
+  if (comm->me == 0) {
+    utils::logmesg(lmp,
+                   "fix cvhd/global/distortion: event-local candidate update at step {}: CC break->amb={}, CH break->amb={}, CC form->amb={}, active ambiguous C-C={}, active ambiguous C-H={}, connected C-C={}, connected C-H={}\n",
+                   update->ntimestep, cc_break_to_amb, ch_break_to_amb, cc_form_to_amb,
+                   ambiguous_cc_pairs_.size(), ambiguous_ch_pairs_.size(),
+                   cc_break_.pairs.size(), ch_break_.pairs.size());
+  }
+}
+
+
+
+void FixCvhdGlobalDistortion::build_initial_ambiguous_pairs()
+{
+  ambiguous_cc_pairs_.clear();
+  ambiguous_ch_pairs_.clear();
+  backend_sync_host_atoms_for_reference();
+
+  double **x = atom->x;
+  int *type = atom->type;
+  tagint *tag = atom->tag;
+  const int nlocal = atom->nlocal;
+  const int nall = atom->nlocal + atom->nghost;
+
+  const double cc_bond2 = cc_break_.rmax * cc_break_.rmax;
+  const double ch_bond2 = ch_break_.rmax * ch_break_.rmax;
+  const double cc_ts = cc_break_.ref * (1.0 + cv1_cutoff_cc_);
+  const double ch_ts = ch_break_.ref * (1.0 + cv1_cutoff_ch_);
+  const double cc_ts2 = cc_ts * cc_ts;
+  const double ch_ts2 = ch_ts * ch_ts;
+
+  for (int i = 0; i < nlocal; ++i) {
+    if (!in_fix_group(i)) continue;
+    for (int j = 0; j < nall; ++j) {
+      if (j == i) continue;
+      if (!in_fix_group(j)) continue;
+      const bool cc = (type[i] == carbon_type_ && type[j] == carbon_type_);
+      const bool ch = ((type[i] == carbon_type_ && type[j] == hydrogen_type_) ||
+                       (type[i] == hydrogen_type_ && type[j] == carbon_type_));
+      if (!cc && !ch) continue;
+
+      double dx = x[j][0] - x[i][0];
+      double dy = x[j][1] - x[i][1];
+      double dz = x[j][2] - x[i][2];
+      if (domain->periodicity[0] || domain->periodicity[1] || domain->periodicity[2]) {
+        domain->minimum_image(FLERR,dx,dy,dz);
+      }
+      const double rsq = dx*dx + dy*dy + dz*dz;
+
+      if (cc) {
+        if (rsq < cc_bond2 || rsq > cc_ts2) continue;
+        const auto ii = carbon_tag_to_index_.find(tag[i]);
+        const auto jj = carbon_tag_to_index_.find(tag[j]);
+        if (ii == carbon_tag_to_index_.end() || jj == carbon_tag_to_index_.end()) continue;
+        ambiguous_cc_pairs_.insert(pack_cc_pair_indices(ii->second, jj->second));
+      } else if (ch) {
+        if (rsq < ch_bond2 || rsq > ch_ts2) continue;
+        int ci = -1;
+        tagint htag = 0;
+        if (type[i] == carbon_type_) {
+          const auto ii = carbon_tag_to_index_.find(tag[i]);
+          if (ii == carbon_tag_to_index_.end()) continue;
+          ci = ii->second;
+          htag = tag[j];
+        } else {
+          const auto jj = carbon_tag_to_index_.find(tag[j]);
+          if (jj == carbon_tag_to_index_.end()) continue;
+          ci = jj->second;
+          htag = tag[i];
+        }
+        ambiguous_ch_pairs_.insert(pack_ch_pair_index_tag(ci, htag));
+      }
+    }
+  }
+
+  rebuild_directional_cc_exclusions_from_ambiguous();
+
+  if (comm->me == 0 && (!ambiguous_cc_pairs_.empty() || !ambiguous_ch_pairs_.empty())) {
+    utils::logmesg(lmp,
+                   "fix cvhd/global/distortion: initial ambiguous pairs: C-C={}, C-H={}\n",
+                   ambiguous_cc_pairs_.size(), ambiguous_ch_pairs_.size());
+  }
+}
+
 bool FixCvhdGlobalDistortion::are_cc_connected(tagint itag, tagint jtag) const
 {
   const auto ii = carbon_tag_to_index_.find(itag);
@@ -1773,6 +2436,7 @@ void FixCvhdGlobalDistortion::build_current_formation_force_pairs(std::vector<Pa
       const tagint itag = tag[i];
       const tagint jtag = tag[j];
       if (are_cc_connected(itag,jtag)) continue;
+      if (cc_pair_recently_broken_tags(itag,jtag)) continue;
 
       double dx = x[j][0] - x[i][0];
       double dy = x[j][1] - x[i][1];
@@ -1871,6 +2535,7 @@ void FixCvhdGlobalDistortion::update_cc_connectivity()
         const tagint jtag = tag[j];
 
         if (are_cc_connected(itag,jtag)) continue;
+        if (cc_pair_recently_broken_tags(itag,jtag)) continue;
 
         double dx = x[j][0] - x[i][0];
         double dy = x[j][1] - x[i][1];
@@ -1907,19 +2572,26 @@ void FixCvhdGlobalDistortion::update_cc_connectivity()
 
   if (global_breaks.empty() && global_forms.empty()) return;
 
+  // Event-cycle hysteresis: clear the previous CVHD event's exclusion tables and
+  // store only the pairs changed by the current connectivity update.
+  clear_recent_cc_event_exclusions();
+
   // Apply breaks first, then formations.  This allows a pair that has separated
   // and later re-formed to be treated consistently.
   for (const PairRef &p : global_breaks) {
     set_cc_connected(p.itag, p.jtag, false);
+    record_recently_broken_cc(p.itag, p.jtag);
   }
   for (const PairRef &p : global_forms) {
     set_cc_connected(p.itag, p.jtag, true);
+    record_recently_formed_cc(p.itag, p.jtag);
   }
 
   cc_event_break_count_ += static_cast<long long>(global_breaks.size());
   cc_event_form_count_ += static_cast<long long>(global_forms.size());
 
   rebuild_cc_break_pairs_from_connectivity();
+  backend_on_recent_cc_exclusions_changed();
 
   if (comm->me == 0 && (!global_breaks.empty() || !global_forms.empty())) {
     utils::logmesg(lmp,
@@ -1963,6 +2635,9 @@ void FixCvhdGlobalDistortion::build_reference_pairs(TermConfig &term)
                     ((type[i] == hydrogen_type_) && (type[j] == carbon_type_));
         }
         if (!type_ok) continue;
+
+        if (term.kind == CC_PAIR && cc_pair_ambiguous_tags(tag[i], tag[j])) continue;
+        if (term.kind == CH_PAIR && ch_pair_ambiguous_tags(tag[i], tag[j])) continue;
 
         double dx = x[j][0] - x[i][0];
         double dy = x[j][1] - x[i][1];
@@ -2128,6 +2803,7 @@ double FixCvhdGlobalDistortion::compute_formation_value_from_neighbor_list()
       const tagint itag = atom->tag[i];
       const tagint jtag = atom->tag[j];
       if (are_cc_connected(itag,jtag)) continue;
+      if (cc_pair_recently_broken_tags(itag,jtag)) continue;
 
       double dx = x[j][0] - x[i][0];
       double dy = x[j][1] - x[i][1];
@@ -2286,9 +2962,10 @@ void FixCvhdGlobalDistortion::open_output()
   ofs_.open(output_file_.c_str(), std::ios::out);
   if (!ofs_) error->one(FLERR, "Cannot open cvhd/global/distortion output file");
 
-  ofs_ << "# step time ccbb chbb ccbf cv1 cv2 bias n_cc_bonds cc_break_events cc_form_events cvhd_events cvhd_wait opes_nker opes_sigma_cv1 opes_sigma_cv2 opes_rct opes_neff opes_prob opes_raw_bias opes_barrier opes_ct_slope opes_stable_windows opes_dE opes_damp_bias opes_boost\n";
+  ofs_ << "# step time ccbb chbb ccbf cv1 cv2 bias n_cc_bonds n_ch_bonds n_cc_form_candidates n_amb_cc n_amb_ch n_h_event cvhd_events cvhd_wait opes_nker opes_sigma_cv1 opes_sigma_cv2 opes_rct opes_neff opes_prob opes_raw_bias opes_barrier opes_ct_slope opes_stable_windows opes_dE opes_damp_bias opes_boost\n";
   ofs_ << std::scientific << std::setprecision(16);
 }
+
 
 void FixCvhdGlobalDistortion::write_output()
 {
@@ -2307,9 +2984,12 @@ void FixCvhdGlobalDistortion::write_output()
        << values_[3] << " "
        << values_[4] << " "
        << values_[8] << " "
-       << static_cast<long long>(values_[12]) << " "
-       << static_cast<long long>(values_[13]) << " "
-       << static_cast<long long>(values_[14]) << " "
+       << static_cast<long long>(values_[5]) << " "
+       << static_cast<long long>(values_[6]) << " "
+       << static_cast<long long>(values_[7]) << " "
+       << static_cast<long long>(ambiguous_cc_pairs_.size()) << " "
+       << static_cast<long long>(ambiguous_ch_pairs_.size()) << " "
+       << static_cast<long long>(h_event_set_.size()) << " "
        << static_cast<long long>(values_[26]) << " "
        << static_cast<long long>(values_[27]) << " "
        << static_cast<long long>(values_[18]) << " "
@@ -2332,7 +3012,7 @@ void FixCvhdGlobalDistortion::print_summary() const
 {
   if (comm->me != 0) return;
 
-  utils::logmesg(lmp, "fix cvhd/global/distortion V3k-hybrid-perf summary:\n");
+  utils::logmesg(lmp, "fix cvhd/global/distortion V3s-cleanup summary:\n");
   utils::logmesg(lmp, "  config file: {}\n", config_file_);
   utils::logmesg(lmp, "  output file: {}\n", output_file_);
   utils::logmesg(lmp, "  kk_pair_cache_policy={} (Kokkos /kk only)\n", kk_pair_cache_policy_);
@@ -2347,10 +3027,10 @@ void FixCvhdGlobalDistortion::print_summary() const
   utils::logmesg(lmp, "  ch_break global reference pairs: {}\n", ch_break_.pairs.size());
   utils::logmesg(lmp, "  cc_form current global candidate pairs: {}\n", last_cc_form_pair_count_);
   utils::logmesg(lmp, "  bias_enable={}\n", static_cast<int>(bias_enable_));
-  utils::logmesg(lmp, "  OPES V3k-hybrid-perf: use_cv2={}, ncv={}, temp={}, kBT={}, barrier={}, gamma={}, prefactor={}, epsilon={}\n",
+  utils::logmesg(lmp, "  OPES V3s-cleanup: use_cv2={}, ncv={}, temp={}, kBT={}, barrier={}, gamma={}, prefactor={}, epsilon={}\n",
                  static_cast<int>(opes_use_cv2_), opes_ncv_, opes_temperature_, opes_kbt_,
                  opes_barrier_, opes_biasfactor_, opes_bias_prefactor_, opes_epsilon_);
-  utils::logmesg(lmp, "  OPES V3k-hybrid-perf: pace={}, adaptive_sigma_stride={}, kernel_cutoff={}, sigma_min_hardcoded={}\n",
+  utils::logmesg(lmp, "  OPES V3s-cleanup: pace={}, adaptive_sigma_stride={}, kernel_cutoff={}, sigma_min_hardcoded={}\n",
                  opes_pace_, opes_adaptive_sigma_stride_, opes_kernel_cutoff_,
                  OPES_SIGMA_MIN_HARDCODED);
   utils::logmesg(lmp, "  OPES units: kBT = force->boltz * temperature = {}\n", opes_kbt_);
@@ -2368,6 +3048,8 @@ void FixCvhdGlobalDistortion::print_summary() const
                  static_cast<int>(cc_connectivity_update_), cc_break_bond_threshold_, cc_form_bond_threshold_);
   utils::logmesg(lmp, "  cc_form_candidate_rmax={} (0 disables runtime upper filtering)\n",
                  cc_form_candidate_rmax_);
+  utils::logmesg(lmp, "  H-state tracking: enable={}, active h_event={}, ambiguous C-H={}\n",
+                 static_cast<int>(h_event_scan_enable_), h_event_set_.size(), ambiguous_ch_pairs_.size());
   utils::logmesg(lmp, "  carbon table size: {}, connected C-C bonds: {}\n",
                  carbon_tags_.size(), cc_break_.pairs.size());}
 
@@ -2398,6 +3080,7 @@ void FixCvhdGlobalDistortion::read_config(const char *filename)
     else if (key == "output_file") iss >> output_file_;
     else if (key == "output_stride") iss >> output_stride_;
     else if (key == "compute_stride") iss >> compute_stride_;
+    else if (key == "h_event_scan_enable") iss >> h_event_scan_enable_;
     else if (key == "kk_pair_cache_policy") iss >> kk_pair_cache_policy_;
     else if (key == "kk_fused_neighbor_enable") iss >> kk_fused_neighbor_enable_;
     else if (key == "kk_max_cc_partners") iss >> kk_max_cc_partners_;

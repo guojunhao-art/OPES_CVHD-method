@@ -6,11 +6,9 @@
 # Use the same compiler/MPI wrapper and integer-size settings as the LAMMPS
 # executable that will load this plugin.
 
-LAMMPS_SRC ?= /path/to/lammps/src
-CXX = mpicxx
-KOKKOS_DEFS ?=
-CUDA_ARCH ?=
-CXXFLAGS ?= -O2 -fPIC -std=c++17 $(KOKKOS_DEFS) $(CUDA_ARCH)
+LAMMPS_SRC ?= /home/guojunhao/software/lammps_test/lammps-22Jul2025/src
+CXX = /home/guojunhao/software/lammps_test/lammps-22Jul2025/lib/kokkos/bin/nvcc_wrapper  -DLMP_KOKKOS -I/home/guojunhao/software/lammps_test/lammps-22Jul2025/lib/kokkos/core/src -I/home/guojunhao/software/lammps_test/lammps-22Jul2025/lib/kokkos/containers/src -I/home/guojunhao/software/lammps_test/lammps-22Jul2025/lib/kokkos/algorithms/src -I/home/guojunhao/software/lammps_test/lammps-22Jul2025/lib/kokkos/core/src -I/home/guojunhao/software/lammps_test/lammps-22Jul2025/BUILD_PLUMED/lib/kokkos -I/home/guojunhao/software/lammps_test/lammps-22Jul2025/lib/kokkos/tpls/desul/include -I/home/guojunhao/software/lammps_test/lammps-22Jul2025/BUILD_PLUMED/lib/kokkos/core/src -I/home/guojunhao/software/lammps_test/lammps-22Jul2025/lib/kokkos/tpls/mdspan/include
+CXXFLAGS ?= -O2 -fPIC -std=c++17 --expt-extended-lambda --expt-relaxed-constexpr -arch=sm_70
 LDFLAGS ?= -shared
 
 TARGET = cvhdplugin.so

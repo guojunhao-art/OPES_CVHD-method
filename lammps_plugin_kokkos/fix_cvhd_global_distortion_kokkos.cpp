@@ -1,11 +1,11 @@
 /* ----------------------------------------------------------------------
-   USER-CVHD: V3k experimental /kk subclass
+   USER-CVHD: V3s-cleanup experimental /kk subclass
 
-   Implemented in V3k:
+   Implemented in V3s-cleanup:
      - Kokkos device reductions for ccbb/chbb reference-pair raw CVs
      - Kokkos device force application for ccbb/chbb bias forces
 
-   Still CPU fallback in V3k:
+   Still CPU fallback in V3s-cleanup:
      - ccbf formation CV
      - ccbf formation force
      - OPES state machine
@@ -52,7 +52,7 @@ FixCvhdGlobalDistortionKokkos::FixCvhdGlobalDistortionKokkos(LAMMPS *lmp,
   if (comm && comm->me == 0) {
 #ifdef LMP_KOKKOS
     utils::logmesg(lmp,
-                   "fix cvhd/global/distortion/kk V3k: LMP_KOKKOS enabled; "
+                   "fix cvhd/global/distortion/kk V3s-cleanup: LMP_KOKKOS enabled; "
                    "fused_neighbor={}, breaking backend=Kokkos, formation backend={}, "
                    "pair_cache_policy={}\n",
                    static_cast<int>(kk_fused_neighbor_enable_),
@@ -289,10 +289,240 @@ bool FixCvhdGlobalDistortionKokkos::backend_collect_reference_pairs(const TermCo
 
   local_pairs.reserve(static_cast<std::size_t>(actual_count));
   for (int p = 0; p < actual_count; ++p) {
+    if (term.kind == CC_PAIR && cc_pair_ambiguous_tags(h_a(p), h_b(p))) continue;
+    if (term.kind == CH_PAIR && ch_pair_ambiguous_tags(h_a(p), h_b(p))) continue;
+
     PairRef pr;
     pr.itag = h_a(p);
     pr.jtag = h_b(p);
     pr.ref = term.ref;
+    local_pairs.push_back(pr);
+  }
+
+  return true;
+#endif
+}
+
+
+bool FixCvhdGlobalDistortionKokkos::backend_collect_cc_formation_event_pairs(
+    double form_threshold, std::vector<PairRef> &local_pairs)
+{
+#ifndef LMP_KOKKOS
+  return false;
+#else
+  if (!k_list_) return false;
+  if (!atomKK) atomKK = static_cast<AtomKokkos *>(atom);
+
+  ensure_fused_cache_current();
+
+  atomKK->sync(Device, X_MASK | TYPE_MASK | TAG_MASK | MASK_MASK);
+  auto x = atomKK->k_x.view<DeviceType>();
+  auto type = atomKK->k_type.view<DeviceType>();
+  auto tag = atomKK->k_tag.view<DeviceType>();
+  auto mask = atomKK->k_mask.view<DeviceType>();
+
+  auto d_ilist = k_list_->d_ilist;
+  auto d_numneigh = k_list_->d_numneigh;
+  auto d_neighbors = k_list_->d_neighbors;
+  const int inum = list_->inum;
+
+  const auto l2c = fused_dev_.local_to_cidx;
+  const auto cc_count = fused_dev_.cc_partner_count;
+  const auto cc_partner = fused_dev_.cc_partner_cidx;
+  const auto recent_broken = recent_broken_cc_dev_;
+  const int n_recent_broken = n_recent_broken_cc_dev_;
+
+  const int carbon_type = carbon_type_;
+  const int groupbit_local = groupbit;
+  const double form_threshold2 = form_threshold * form_threshold;
+  const double cand2 = (cc_form_candidate_rmax_ > 0.0)
+                     ? cc_form_candidate_rmax_ * cc_form_candidate_rmax_
+                     : -1.0;
+
+  const int periodic0 = domain->periodicity[0];
+  const int periodic1 = domain->periodicity[1];
+  const int periodic2 = domain->periodicity[2];
+  const double xprd = domain->xprd;
+  const double yprd = domain->yprd;
+  const double zprd = domain->zprd;
+  const double hx = 0.5 * xprd;
+  const double hy = 0.5 * yprd;
+  const double hz = 0.5 * zprd;
+
+  int local_count = 0;
+  Kokkos::parallel_reduce("cvhd_event_form_count",
+                          Kokkos::RangePolicy<DeviceType>(0, inum),
+                          KOKKOS_LAMBDA(const int ii, int &sum) {
+    const int i = d_ilist(ii);
+    if (!(mask(i) & groupbit_local)) return;
+    if (type(i) != carbon_type) return;
+    const int ci = l2c(i);
+    if (ci < 0) return;
+
+    const int jnum = d_numneigh(i);
+    for (int jj = 0; jj < jnum; ++jj) {
+      const int j = d_neighbors(i,jj) & NEIGHMASK;
+      if (j == i) continue;
+      if (!(mask(j) & groupbit_local)) continue;
+      if (type(j) != carbon_type) continue;
+      const int cj = l2c(j);
+      if (cj < 0 || cj == ci) continue;
+
+      bool connected = false;
+      const int ncc = cc_count(ci);
+      for (int k = 0; k < ncc; ++k) {
+        if (cc_partner(ci,k) == cj) {
+          connected = true;
+          break;
+        }
+      }
+      if (connected) continue;
+
+      int ca = ci;
+      int cb = cj;
+      if (cb < ca) {
+        const int tmp = ca;
+        ca = cb;
+        cb = tmp;
+      }
+      const std::uint64_t ckey =
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ca)) << 32) |
+        static_cast<std::uint32_t>(cb);
+
+      for (int k = 0; k < n_recent_broken; ++k) {
+        if (recent_broken(k) == ckey) return;
+      }
+
+      double dx = x(j,0) - x(i,0);
+      double dy = x(j,1) - x(i,1);
+      double dz = x(j,2) - x(i,2);
+
+      if (periodic0) {
+        if (dx > hx) dx -= xprd;
+        else if (dx < -hx) dx += xprd;
+      }
+      if (periodic1) {
+        if (dy > hy) dy -= yprd;
+        else if (dy < -hy) dy += yprd;
+      }
+      if (periodic2) {
+        if (dz > hz) dz -= zprd;
+        else if (dz < -hz) dz += zprd;
+      }
+
+      const double rsq = dx*dx + dy*dy + dz*dz;
+      if (cand2 > 0.0 && rsq > cand2) continue;
+      if (rsq > form_threshold2) continue;
+
+      ++sum;
+    }
+  }, local_count);
+
+  local_pairs.clear();
+  if (local_count <= 0) return true;
+
+  Kokkos::View<tagint*, DeviceType> d_a("cvhd_event_form_a", local_count);
+  Kokkos::View<tagint*, DeviceType> d_b("cvhd_event_form_b", local_count);
+  Kokkos::View<int*, DeviceType> d_counter("cvhd_event_form_counter", 1);
+  Kokkos::deep_copy(d_counter, 0);
+
+  Kokkos::parallel_for("cvhd_event_form_fill",
+                       Kokkos::RangePolicy<DeviceType>(0, inum),
+                       KOKKOS_LAMBDA(const int ii) {
+    const int i = d_ilist(ii);
+    if (!(mask(i) & groupbit_local)) return;
+    if (type(i) != carbon_type) return;
+    const int ci = l2c(i);
+    if (ci < 0) return;
+
+    const int jnum = d_numneigh(i);
+    for (int jj = 0; jj < jnum; ++jj) {
+      const int j = d_neighbors(i,jj) & NEIGHMASK;
+      if (j == i) continue;
+      if (!(mask(j) & groupbit_local)) continue;
+      if (type(j) != carbon_type) continue;
+      const int cj = l2c(j);
+      if (cj < 0 || cj == ci) continue;
+
+      bool connected = false;
+      const int ncc = cc_count(ci);
+      for (int k = 0; k < ncc; ++k) {
+        if (cc_partner(ci,k) == cj) {
+          connected = true;
+          break;
+        }
+      }
+      if (connected) continue;
+
+      int ca = ci;
+      int cb = cj;
+      if (cb < ca) {
+        const int tmp = ca;
+        ca = cb;
+        cb = tmp;
+      }
+      const std::uint64_t ckey =
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ca)) << 32) |
+        static_cast<std::uint32_t>(cb);
+
+      for (int k = 0; k < n_recent_broken; ++k) {
+        if (recent_broken(k) == ckey) return;
+      }
+
+      double dx = x(j,0) - x(i,0);
+      double dy = x(j,1) - x(i,1);
+      double dz = x(j,2) - x(i,2);
+
+      if (periodic0) {
+        if (dx > hx) dx -= xprd;
+        else if (dx < -hx) dx += xprd;
+      }
+      if (periodic1) {
+        if (dy > hy) dy -= yprd;
+        else if (dy < -hy) dy += yprd;
+      }
+      if (periodic2) {
+        if (dz > hz) dz -= zprd;
+        else if (dz < -hz) dz += zprd;
+      }
+
+      const double rsq = dx*dx + dy*dy + dz*dz;
+      if (cand2 > 0.0 && rsq > cand2) continue;
+      if (rsq > form_threshold2) continue;
+
+      tagint a = tag(i);
+      tagint b = tag(j);
+      if (b < a) {
+        const tagint tmp = a;
+        a = b;
+        b = tmp;
+      }
+
+      const int idx = Kokkos::atomic_fetch_add(&d_counter(0), 1);
+      if (idx < local_count) {
+        d_a(idx) = a;
+        d_b(idx) = b;
+      }
+    }
+  });
+
+  auto h_a = Kokkos::create_mirror_view(d_a);
+  auto h_b = Kokkos::create_mirror_view(d_b);
+  auto h_counter = Kokkos::create_mirror_view(d_counter);
+  Kokkos::deep_copy(h_a, d_a);
+  Kokkos::deep_copy(h_b, d_b);
+  Kokkos::deep_copy(h_counter, d_counter);
+
+  const int actual_count = std::min(local_count, h_counter(0));
+  local_pairs.reserve(static_cast<std::size_t>(actual_count));
+  for (int p = 0; p < actual_count; ++p) {
+    if (cc_pair_ambiguous_tags(h_a(p), h_b(p))) continue;
+    if (are_cc_connected(h_a(p), h_b(p))) continue;
+
+    PairRef pr;
+    pr.itag = h_a(p);
+    pr.jtag = h_b(p);
+    pr.ref = cc_break_.ref;
     local_pairs.push_back(pr);
   }
 
@@ -333,11 +563,47 @@ void FixCvhdGlobalDistortionKokkos::mark_fused_cache_dirty()
 }
 #endif
 
+void FixCvhdGlobalDistortionKokkos::update_recent_cc_exclusions_device()
+{
+  n_recent_broken_cc_dev_ = static_cast<int>(recently_broken_cc_pairs_.size());
+  n_recent_formed_cc_dev_ = static_cast<int>(recently_formed_cc_pairs_.size());
+  n_ambiguous_ch_dev_ = static_cast<int>(ambiguous_ch_pairs_.size());
+
+  recent_broken_cc_dev_ = Kokkos::View<std::uint64_t*, DeviceType>("cvhd_recent_broken_cc",
+                                                                   n_recent_broken_cc_dev_);
+  recent_formed_cc_dev_ = Kokkos::View<std::uint64_t*, DeviceType>("cvhd_recent_formed_cc",
+                                                                   n_recent_formed_cc_dev_);
+  ambiguous_ch_dev_ = Kokkos::View<std::uint64_t*, DeviceType>("cvhd_ambiguous_ch",
+                                                               n_ambiguous_ch_dev_);
+
+  if (n_recent_broken_cc_dev_ > 0) {
+    auto h = Kokkos::create_mirror_view(recent_broken_cc_dev_);
+    int k = 0;
+    for (const auto key : recently_broken_cc_pairs_) h(k++) = key;
+    Kokkos::deep_copy(recent_broken_cc_dev_, h);
+  }
+
+  if (n_recent_formed_cc_dev_ > 0) {
+    auto h = Kokkos::create_mirror_view(recent_formed_cc_dev_);
+    int k = 0;
+    for (const auto key : recently_formed_cc_pairs_) h(k++) = key;
+    Kokkos::deep_copy(recent_formed_cc_dev_, h);
+  }
+
+  if (n_ambiguous_ch_dev_ > 0) {
+    auto h = Kokkos::create_mirror_view(ambiguous_ch_dev_);
+    int k = 0;
+    for (const auto key : ambiguous_ch_pairs_) h(k++) = key;
+    Kokkos::deep_copy(ambiguous_ch_dev_, h);
+  }
+}
+
 void FixCvhdGlobalDistortionKokkos::backend_on_reference_pairs_changed()
 {
 #ifdef LMP_KOKKOS
   // Reference pairs changed after setup/reset/rebuild_ref.  Their local-index
   // device caches are no longer valid.
+  update_recent_cc_exclusions_device();
   mark_pair_cache_dirty();
   mark_fused_cache_dirty();
 #endif
@@ -351,6 +617,16 @@ void FixCvhdGlobalDistortionKokkos::backend_on_connectivity_changed()
   mark_fused_cache_dirty();
 #endif
   FixCvhdGlobalDistortion::backend_on_connectivity_changed();
+}
+
+void FixCvhdGlobalDistortionKokkos::backend_on_recent_cc_exclusions_changed()
+{
+#ifdef LMP_KOKKOS
+  update_recent_cc_exclusions_device();
+  mark_pair_cache_dirty();
+  mark_fused_cache_dirty();
+#endif
+  FixCvhdGlobalDistortion::backend_on_recent_cc_exclusions_changed();
 }
 
 #ifdef LMP_KOKKOS
@@ -373,6 +649,9 @@ void FixCvhdGlobalDistortionKokkos::update_pair_cache_from_tags(const TermConfig
   h_count.reserve(term.pairs.size());
 
   for (const PairRef &p : term.pairs) {
+    if (!term.do_form && term.kind == CC_PAIR && cc_pair_ambiguous_tags(p.itag, p.jtag)) continue;
+    if (!term.do_form && term.kind == CH_PAIR && ch_pair_ambiguous_tags(p.itag, p.jtag)) continue;
+
     const auto ii = tag_to_local_.find(p.itag);
     const auto jj = tag_to_local_.find(p.jtag);
     if (ii == tag_to_local_.end() || jj == tag_to_local_.end()) continue;
@@ -584,6 +863,8 @@ void FixCvhdGlobalDistortionKokkos::compute_fused_raw_cvs_kokkos(double &ccbb,
   const auto cc_partner = fused_dev_.cc_partner_cidx;
   const auto ch_count = fused_dev_.ch_partner_count;
   const auto ch_tag = fused_dev_.ch_partner_tag;
+  const auto recent_broken = recent_broken_cc_dev_;
+  const int n_recent_broken = n_recent_broken_cc_dev_;
 
   Kokkos::View<double*, DeviceType> sums("cvhd_fused_sums", 4);
   Kokkos::deep_copy(sums, 0.0);
@@ -592,7 +873,7 @@ void FixCvhdGlobalDistortionKokkos::compute_fused_raw_cvs_kokkos(double &ccbb,
   const int hydrogen_type = hydrogen_type_;
   const int groupbit_local = groupbit;
 
-  // V3k hybrid CV: fused neighbor-list reduction computes formation ccbf only.
+  // V3s-cleanup hybrid CV: fused neighbor-list reduction computes formation ccbf only.
   // Breaking CVs ccbb/chbb are computed from reference-pair caches so that a
   // stretched bond cannot disappear from the CV when it leaves the neighbor list.
   const bool cf_enabled = cc_form_.enabled;
@@ -664,6 +945,25 @@ void FixCvhdGlobalDistortionKokkos::compute_fused_raw_cvs_kokkos(double &ccbb,
           }
         }
         if (connected) continue;
+
+        int ca = ci;
+        int cb = cj;
+        if (cb < ca) {
+          const int tmp = ca;
+          ca = cb;
+          cb = tmp;
+        }
+        const std::uint64_t ckey =
+          (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ca)) << 32) |
+          static_cast<std::uint32_t>(cb);
+        bool recent_broken_pair = false;
+        for (int k = 0; k < n_recent_broken; ++k) {
+          if (recent_broken(k) == ckey) {
+            recent_broken_pair = true;
+            break;
+          }
+        }
+        if (recent_broken_pair) continue;
 
         const double r = sqrt(rsq);
         if (r > cf_ref) continue;
@@ -738,6 +1038,12 @@ void FixCvhdGlobalDistortionKokkos::apply_fused_forces_kokkos(double ccbb, doubl
   const auto cc_partner = fused_dev_.cc_partner_cidx;
   const auto ch_count = fused_dev_.ch_partner_count;
   const auto ch_tag = fused_dev_.ch_partner_tag;
+  const auto recent_broken = recent_broken_cc_dev_;
+  const auto recent_formed = recent_formed_cc_dev_;
+  const auto ambiguous_ch = ambiguous_ch_dev_;
+  const int n_recent_broken = n_recent_broken_cc_dev_;
+  const int n_recent_formed = n_recent_formed_cc_dev_;
+  const int n_ambiguous_ch = n_ambiguous_ch_dev_;
 
   const int carbon_type = carbon_type_;
   const int hydrogen_type = hydrogen_type_;
@@ -830,6 +1136,25 @@ void FixCvhdGlobalDistortionKokkos::apply_fused_forces_kokkos(double ccbb, doubl
         }
 
         if (connected) {
+          int ca = ci;
+          int cb = cj;
+          if (cb < ca) {
+            const int tmp = ca;
+            ca = cb;
+            cb = tmp;
+          }
+          const std::uint64_t ckey =
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ca)) << 32) |
+            static_cast<std::uint32_t>(cb);
+          bool recent_formed_pair = false;
+          for (int k = 0; k < n_recent_formed; ++k) {
+            if (recent_formed(k) == ckey) {
+              recent_formed_pair = true;
+              break;
+            }
+          }
+          if (recent_formed_pair) continue;
+
           if (do_cc && r >= cc_ref) {
             active = true;
             formation = false;
@@ -840,6 +1165,25 @@ void FixCvhdGlobalDistortionKokkos::apply_fused_forces_kokkos(double ccbb, doubl
           }
         } else {
           if (do_cf) {
+            int ca = ci;
+            int cb = cj;
+            if (cb < ca) {
+              const int tmp = ca;
+              ca = cb;
+              cb = tmp;
+            }
+            const std::uint64_t ckey =
+              (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ca)) << 32) |
+              static_cast<std::uint32_t>(cb);
+            bool recent_broken_pair = false;
+            for (int k = 0; k < n_recent_broken; ++k) {
+              if (recent_broken(k) == ckey) {
+                recent_broken_pair = true;
+                break;
+              }
+            }
+            if (recent_broken_pair) continue;
+
             if (cand2 > 0.0 && rsq > cand2) continue;
             if (r > cf_ref) continue;
             active = true;
@@ -957,7 +1301,7 @@ double FixCvhdGlobalDistortionKokkos::compute_breaking_value_kokkos(const TermCo
     double dy = x(j,1) - x(i,1);
     double dz = x(j,2) - x(i,2);
 
-    // Orthogonal minimum image.  V3k keeps the same limitation as V3c.
+    // Orthogonal minimum image.  V3s-cleanup keeps the same limitation as V3c.
     if (periodic0) {
       if (dx > hx) dx -= xprd;
       else if (dx < -hx) dx += xprd;

@@ -33,7 +33,7 @@ extern "C" void lammpsplugin_init(void *lmp, void *handle, void *regfunc)
   plugin.version = LAMMPS_VERSION;
   plugin.style   = "fix";
   plugin.name    = "cvhd/global/distortion";
-  plugin.info    = "CVHD global-distortion V3k-hybrid-perf OPES_CVHD fix";
+  plugin.info    = "CVHD global-distortion V3s-cleanup OPES_CVHD fix";
   plugin.author  = "Junhao Guo and ChatGPT";
   plugin.creator.v2 = (lammpsplugin_factory2 *) &cvhd_global_distortion_creator;
   plugin.handle  = handle;
@@ -44,7 +44,7 @@ extern "C" void lammpsplugin_init(void *lmp, void *handle, void *regfunc)
   plugin_kk.version = LAMMPS_VERSION;
   plugin_kk.style   = "fix";
   plugin_kk.name    = "cvhd/global/distortion/kk";
-  plugin_kk.info    = "CVHD global-distortion V3k /kk hybrid CV backend with fused local force and tag-map performance fixes";
+  plugin_kk.info    = "CVHD global-distortion V3s-cleanup /kk hybrid CV backend with event-cycle C-C exclusion tables";
   plugin_kk.author  = "Junhao Guo and ChatGPT";
   plugin_kk.creator.v2 = (lammpsplugin_factory2 *) &cvhd_global_distortion_kk_creator;
   plugin_kk.handle  = handle;

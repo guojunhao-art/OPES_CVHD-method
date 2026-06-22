@@ -1,5 +1,5 @@
 /* ----------------------------------------------------------------------
-   USER-CVHD: V3k-hybrid-perf reference implementation of global-distortion CVs for LAMMPS
+   USER-CVHD: V3s-cleanup reference implementation of global-distortion CVs for LAMMPS
 
    CPU reference fix:
      - MPI-safe global CV reductions
@@ -24,9 +24,11 @@ FixStyle(cvhd/global/distortion,FixCvhdGlobalDistortion);
 #include "fix.h"
 
 #include <array>
+#include <cstdint>
 #include <fstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace LAMMPS_NS {
@@ -97,6 +99,7 @@ class FixCvhdGlobalDistortion : public Fix {
   std::string output_file_;
   std::ofstream ofs_;
 
+
   int carbon_type_;
   int hydrogen_type_;
 
@@ -117,6 +120,7 @@ class FixCvhdGlobalDistortion : public Fix {
   // Host tag->local map cache. CPU backend rebuilds it every compute; Kokkos
   // hybrid backend rebuilds it only when local-index mapping may have changed.
   bool tag_map_dirty_;
+  bool h_event_scan_enable_;
 
   // Lightweight internal timers. Disabled by default.
   bool cvhd_timer_enable_;
@@ -319,6 +323,22 @@ class FixCvhdGlobalDistortion : public Fix {
   std::unordered_map<tagint,int> carbon_tag_to_index_;
   std::vector<std::vector<int>> cc_adj_;
 
+  // Directional device exclusion mirrors. In V3s-cleanup both are populated from
+  // ambiguous_cc_pairs_, so an ambiguous C-C pair is excluded from both
+  // breaking and formation channels.
+  std::unordered_set<std::uint64_t> recently_broken_cc_pairs_;
+  std::unordered_set<std::uint64_t> recently_formed_cc_pairs_;
+
+  // Candidate/ambiguous state lists.  These pairs sit between the bonded cutoff
+  // and the derived TS-like CV cutoff and are excluded from bias CV/force until
+  // a later CVHD reset classifies them as clearly bonded or clearly nonbonded.
+  std::unordered_set<std::uint64_t> ambiguous_cc_pairs_;
+  std::unordered_set<std::uint64_t> ambiguous_ch_pairs_;
+
+  // H atoms with no currently resolved C-H owner.  These are scanned at CVHD
+  // event/reset times to detect later C-H formation or ambiguous C-H contacts.
+  std::unordered_set<tagint> h_event_set_;
+
   // tag -> current local index, including owned and ghost atoms.
   std::unordered_map<tagint,int> tag_to_local_;
 
@@ -326,7 +346,6 @@ class FixCvhdGlobalDistortion : public Fix {
   void read_config(const char *filename);
   void validate_config() const;
   void open_output();
-
   void build_tag_map();
   void build_reference_pairs(TermConfig &term);
   void gather_unique_reference_pairs(TermConfig &term, const std::vector<PairRef> &local_pairs);
@@ -339,6 +358,23 @@ class FixCvhdGlobalDistortion : public Fix {
                                     std::vector<PairRef> &global_pairs,
                                     double ref) const;
   void build_current_formation_force_pairs(std::vector<PairRef> &global_pairs);
+  std::uint64_t pack_cc_pair_indices(int ci, int cj) const;
+  std::uint64_t pack_ch_pair_index_tag(int ci, tagint htag) const;
+  bool cc_pair_recently_broken_indices(int ci, int cj) const;
+  bool cc_pair_recently_formed_indices(int ci, int cj) const;
+  bool cc_pair_recently_broken_tags(tagint itag, tagint jtag) const;
+  bool cc_pair_recently_formed_tags(tagint itag, tagint jtag) const;
+  bool cc_pair_ambiguous_indices(int ci, int cj) const;
+  bool cc_pair_ambiguous_tags(tagint itag, tagint jtag) const;
+  bool ch_pair_ambiguous_tags(tagint itag, tagint jtag) const;
+  void record_recently_broken_cc(tagint itag, tagint jtag);
+  void record_recently_formed_cc(tagint itag, tagint jtag);
+  void rebuild_directional_cc_exclusions_from_ambiguous();
+  void clear_recent_cc_event_exclusions();
+  bool update_ambiguous_pair_states();
+  bool process_h_event_set_cpu();
+  void process_cvhd_event_local_pairs();
+  void build_initial_ambiguous_pairs();
   bool are_cc_connected(tagint itag, tagint jtag) const;
   void set_cc_connected(tagint itag, tagint jtag, bool connected);
 
@@ -360,8 +396,11 @@ class FixCvhdGlobalDistortion : public Fix {
   virtual void backend_sync_host_atoms_for_tag_map();
   virtual void backend_sync_host_atoms_for_reference();
   virtual bool backend_collect_reference_pairs(const TermConfig &term, std::vector<PairRef> &local_pairs);
+  virtual bool backend_collect_cc_formation_event_pairs(double form_threshold,
+                                                        std::vector<PairRef> &local_pairs);
   virtual void backend_on_reference_pairs_changed();
   virtual void backend_on_connectivity_changed();
+  virtual void backend_on_recent_cc_exclusions_changed();
   virtual void backend_compute_raw_cvs(double &ccbb, double &chbb, double &ccbf);
   virtual void backend_apply_bias_forces();
 

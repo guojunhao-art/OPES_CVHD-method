@@ -1,11 +1,9 @@
 /* ----------------------------------------------------------------------
-   USER-CVHD: V3k experimental /kk subclass for LAMMPS
+   USER-CVHD: V3s-cleanup experimental /kk subclass for LAMMPS
 
-   V3k hybrid performance backend:
-     - breaking CVs (ccbb/chbb): Kokkos reference-pair reductions
-     - formation CV (ccbf): Kokkos fused neighbor-list reduction
-     - bias forces: fused local Kokkos neighbor-list kernel
-     - host tag map: dirty/on-demand caching
+   V3s-cleanup hybrid performance backend: reference-pair breaking CVs, fused-neighbor formation/forces, and dirty tag-map caching for C-C/C-H
+   breaking raw CVs (ccbb/chbb).  Formation ccbf and formation force still
+   fall back to the CPU backend.
 ------------------------------------------------------------------------- */
 
 #ifdef FIX_CLASS
@@ -39,10 +37,10 @@ class FixCvhdGlobalDistortionKokkos : public FixCvhdGlobalDistortion {
   void init_list(int, class NeighList *) override;
   void post_neighbor() override;
 
-  // This function launches KOKKOS_LAMBDA kernels through NVCC extended lambdas.
-  // It must be public; otherwise nvcc rejects the enclosing member function.
-  bool backend_collect_reference_pairs(const TermConfig &term,
-                                       std::vector<PairRef> &local_pairs) override;
+  // Contains KOKKOS_LAMBDA and must be public for NVCC extended lambda rules.
+  bool backend_collect_reference_pairs(const TermConfig &term, std::vector<PairRef> &local_pairs) override;
+  bool backend_collect_cc_formation_event_pairs(double form_threshold,
+                                                std::vector<PairRef> &local_pairs) override;
 
  protected:
   bool backend_can_skip_tag_map_each_compute() const override;
@@ -50,6 +48,7 @@ class FixCvhdGlobalDistortionKokkos : public FixCvhdGlobalDistortion {
   void backend_sync_host_atoms_for_reference() override;
   void backend_on_reference_pairs_changed() override;
   void backend_on_connectivity_changed() override;
+  void backend_on_recent_cc_exclusions_changed() override;
   void backend_compute_raw_cvs(double &ccbb, double &chbb, double &ccbf) override;
   void backend_apply_bias_forces() override;
 
@@ -92,6 +91,13 @@ class FixCvhdGlobalDistortionKokkos : public FixCvhdGlobalDistortion {
   DevicePairCache ch_pairs_dev_;
   FusedNeighborCache fused_dev_;
 
+  Kokkos::View<std::uint64_t*, DeviceType> recent_broken_cc_dev_;
+  Kokkos::View<std::uint64_t*, DeviceType> recent_formed_cc_dev_;
+  Kokkos::View<std::uint64_t*, DeviceType> ambiguous_ch_dev_;
+  int n_recent_broken_cc_dev_ = 0;
+  int n_recent_formed_cc_dev_ = 0;
+  int n_ambiguous_ch_dev_ = 0;
+
   bool pair_cache_dirty_ = true;
   bool fused_cache_dirty_ = true;
   bigint pair_cache_last_build_step_ = -1;
@@ -103,6 +109,7 @@ class FixCvhdGlobalDistortionKokkos : public FixCvhdGlobalDistortion {
   void ensure_pair_caches_current();
   void ensure_fused_cache_current();
   void update_fused_cache_from_host();
+  void update_recent_cc_exclusions_device();
   void compute_fused_raw_cvs_kokkos(double &ccbb, double &chbb, double &ccbf);
   void apply_fused_forces_kokkos(double ccbb, double chbb, double ccbf,
                                  double dVdccbb, double dVdchbb, double dVdccbf);

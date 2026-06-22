@@ -1,0 +1,38 @@
+# REAX potential for CHO system
+# .....
+
+units		real
+
+atom_style	charge
+atom_modify     map array
+atom_modify     sort 0 0.0
+boundary        p p p
+package         kokkos neigh half comm device
+newton          on
+
+
+read_data	./big.data
+plugin load     ./cvhdplugin.so
+
+
+pair_style	reaxff/kk NULL minhbonds 100 mincap 200 safezone 5
+pair_coeff	* * ./CHO.ff C H
+fix             1 all qeq/reax/kk 1 0.0 10.0 1e-6 reaxff
+
+
+neighbor	2 bin
+timestep        0.1
+
+
+fix             balance all nvt/kk temp 1500.0 1500.0 100.0
+velocity        all create 1500 356 dist gaussian
+fix             cvhd all cvhd/global/distortion/kk cvhd_global_distortion_v3s_cleanup.cfg
+dump            d all custom 1000 force.dump id type x y z fx fy fz
+#dump_modify     d format float %.16e
+
+fix             bond all reaxff/bonds 1000 bonds_1000.tatb
+
+thermo          1000
+thermo_style	custom step temp density press
+
+run             200000000
