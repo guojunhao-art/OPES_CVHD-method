@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="780" viewBox="0 0 1200 780" role="img" aria-labelledby="title desc">
+  <title id="title">Performance comparison of CVHD implementations</title>
+  <desc id="desc">Horizontal grouped bar chart comparing RTX 4080S and V100 performance for ReaxFF, PLUMED one thread, PLUMED twenty threads, and the LAMMPS Kokkos CVHD plugin.</desc>
+  <rect width="1200" height="780" fill="#ffffff"/>
+  <style>
+    .title { font: 700 34px Arial, Helvetica, sans-serif; fill: #111827; }
+    .subtitle { font: italic 20px Arial, Helvetica, sans-serif; fill: #4b5563; }
+    .label { font: 20px Arial, Helvetica, sans-serif; fill: #111827; }
+    .axis { font: 17px Arial, Helvetica, sans-serif; fill: #374151; }
+    .value { font: 17px Arial, Helvetica, sans-serif; fill: #111827; }
+    .legend { font: 18px Arial, Helvetica, sans-serif; fill: #111827; }
+    .note { font: 15px Arial, Helvetica, sans-serif; fill: #4b5563; }
+  </style>
+
+  <text x="600" y="48" text-anchor="middle" class="title">Performance comparison of CVHD implementations</text>
+  <text x="600" y="82" text-anchor="middle" class="subtitle">12,800-atom reactive MD benchmark (400 n-decane molecules, 0.15 g/mL)</text>
+
+  <!-- Plot frame -->
+  <rect x="330" y="120" width="800" height="500" fill="#ffffff" stroke="#111827" stroke-width="1.5"/>
+
+  <!-- Vertical grid and x-axis labels, 0-1600 katoms·step/s -->
+  <g stroke="#d1d5db" stroke-width="1" stroke-dasharray="4 5">
+    <line x1="330" y1="120" x2="330" y2="620"/>
+    <line x1="430" y1="120" x2="430" y2="620"/>
+    <line x1="530" y1="120" x2="530" y2="620"/>
+    <line x1="630" y1="120" x2="630" y2="620"/>
+    <line x1="730" y1="120" x2="730" y2="620"/>
+    <line x1="830" y1="120" x2="830" y2="620"/>
+    <line x1="930" y1="120" x2="930" y2="620"/>
+    <line x1="1030" y1="120" x2="1030" y2="620"/>
+    <line x1="1130" y1="120" x2="1130" y2="620"/>
+  </g>
+  <g class="axis" text-anchor="middle">
+    <text x="330" y="648">0</text>
+    <text x="430" y="648">200</text>
+    <text x="530" y="648">400</text>
+    <text x="630" y="648">600</text>
+    <text x="730" y="648">800</text>
+    <text x="830" y="648">1000</text>
+    <text x="930" y="648">1200</text>
+    <text x="1030" y="648">1400</text>
+    <text x="1130" y="648">1600</text>
+  </g>
+  <text x="730" y="685" text-anchor="middle" class="label">Performance (katoms·step/s)</text>
+
+  <!-- Category labels -->
+  <g class="label" text-anchor="end">
+    <text x="305" y="185">ReaxFF</text>
+    <text x="305" y="305">PLUMED 1 thread</text>
+    <text x="305" y="425">PLUMED 20 thread</text>
+    <text x="305" y="535">LAMMPS plugin with</text>
+    <text x="305" y="561">Kokkos backend</text>
+  </g>
+
+  <!-- Bars: scale 0.5 px per katoms·step/s -->
+  <!-- ReaxFF -->
+  <rect x="330" y="145" width="247.019" height="34" rx="2" fill="#f4a261"/>
+  <rect x="330" y="185" width="764" height="34" rx="2" fill="#7fb069"/>
+  <text x="589" y="168" class="value">494.038</text>
+  <text x="1106" y="208" class="value">1528</text>
+
+  <!-- PLUMED 1 thread -->
+  <rect x="330" y="265" width="94.019" height="34" rx="2" fill="#f4a261"/>
+  <rect x="330" y="305" width="527.5" height="34" rx="2" fill="#7fb069"/>
+  <text x="436" y="288" class="value">188.038</text>
+  <text x="869" y="328" class="value">1055</text>
+
+  <!-- PLUMED 20 thread -->
+  <rect x="330" y="385" width="196.268" height="34" rx="2" fill="#f4a261"/>
+  <rect x="330" y="425" width="484.302" height="34" rx="2" fill="#7fb069"/>
+  <text x="538" y="408" class="value">392.535</text>
+  <text x="826" y="448" class="value">968.603</text>
+
+  <!-- LAMMPS Kokkos plugin -->
+  <rect x="330" y="505" width="275.569" height="34" rx="2" fill="#f4a261"/>
+  <rect x="330" y="545" width="713" height="34" rx="2" fill="#7fb069"/>
+  <text x="617" y="528" class="value">551.138</text>
+  <text x="1055" y="568" class="value">1426</text>
+
+  <!-- Legend -->
+  <rect x="420" y="710" width="28" height="20" rx="2" fill="#f4a261"/>
+  <text x="460" y="726" class="legend">RTX 4080S</text>
+  <rect x="650" y="710" width="28" height="20" rx="2" fill="#7fb069"/>
+  <text x="690" y="726" class="legend">V100</text>
+
+  <text x="600" y="758" text-anchor="middle" class="note">Higher values indicate better throughput; results are specific to this ReaxFF/QEq and CVHD workload.</text>
+</svg>
